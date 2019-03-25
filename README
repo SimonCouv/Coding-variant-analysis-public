@@ -1,0 +1,27 @@
+All python code is python 3.7.
+
+The project environment (including dependencies) is packaged using conda and following workflow assumes you have conda installed. If this is not the case, further instructions are available here:
+https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html
+
+See here for background on conda environments:
+https://docs.conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html#creating-an-environment-from-an-environment-yml-file
+
+To run the code in this project:
+
+1. Clone this Github repository
+2. To create the conda environment, in terminal: conda env create -f environment.yml
+3. To activate the environment, in terminal: source activate dtp-rotation2
+4. To install additional dependencies dfply and pybiomart, source the script additional_dependencies.sh
+
+The Ensembl Variant Effect Predictor (VEP) step requires a working installation of the VEP script maintained by Ensembl. Installation instructions and extensive documentation are available at https://www.ensembl.org/info/docs/tools/vep/script/index.html. Note that while the pipeline uses the VEP script, the REST client implementation in this repository contains a method for low-throughput VEP lookup, which does not require local installation of the VEP script.
+
+Intermediate data generated in the scripts is included in data.zip, allowing to verify output or skip stages of the analysis. This file is managed via Git Large File Storage (LFS), which replaces files by pointers to an external storage location. Cloning files manages by Git LFS requires installation of a tool separate from Git. Installation and usage instructions are at https://git-lfs.github.com/. More details at https://help.github.com/en/articles/versioning-large-files
+
+
+
+
+
+
+
+
+

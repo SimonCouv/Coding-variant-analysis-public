@@ -21,7 +21,6 @@ import json
 
 # import own functions and classes
 from Ensembl_REST_client import *
-import run_vep_ens_id
 import uniprot_id_mapper
 
 humanchromosomes = [str(x) for x in range(1,23)] + ['X', 'Y', 'MT']

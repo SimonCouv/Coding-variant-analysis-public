@@ -1,0 +1,7 @@
+sift        b
+polyphen    b
+fork        4
+species     homo_sapiens
+assembly    GRCh38
+format      id
+plugin      LocalID
