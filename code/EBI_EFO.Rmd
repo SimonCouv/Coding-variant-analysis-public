@@ -1,0 +1,164 @@
+# EBI EFO
+
+```{r ebi-efo-setup}
+
+efo_desc_rest_url <- "http://www.ebi.ac.uk/ols/api/ontologies/efo/descendants"
+efo_term_rest_url <- "http://www.ebi.ac.uk/ols/api/ontologies/efo/terms"
+datadir <- "/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/"
+
+```
+
+```{r functions}
+query_ebi_ols <- function(rest_desc_url, rest_term_url=NA, page_size,
+                          get_input_labels=FALSE, query_efo_ids){
+  
+  if (get_input_labels & is.na(rest_term_url))
+    stop("rest_term_url required for input label lookup via REST")
+  
+  efo_df_l <- list()
+  for (query_efo_id in query_efo_ids){
+    
+    #debug
+    # query_efo_id <- "EFO:0004529"
+
+    
+
+
+    efo_ids <- efo_labels<- c()
+    page_n <- 0
+    while(TRUE){
+      #get content
+      resp <- GET(rest_desc_url,
+                  query = list(size=page_size,
+                               page=page_n,
+                               id=query_efo_id))
+      cont <- content(resp)
+      
+      #extract descendent ids and labels
+      page_efo_ids <- map_chr(cont$`_embedded`$terms, "obo_id")
+      page_efo_labels <- map_chr(cont$`_embedded`$terms, "label")
+      efo_ids <- c(efo_ids, page_efo_ids)
+      efo_labels <- c(efo_labels, page_efo_labels)
+      
+      #pagination logic
+      is_last_page <- !("next" %in% names(cont$`_links`))
+      if (is_last_page)
+        break
+      else
+        page_n <- page_n + 1
+    }
+    
+    # get input efo id label
+    if (get_input_labels){
+      
+      if (!grepl(query_efo_id, pattern = "EFO"))
+        stop("In current implementation, input labels cannot be requested for non-efo IDs")
+      
+      query_efo_id_underscore <- str_replace(query_efo_id, pattern=":", replacement = "_")
+      
+      resp <- GET(rest_term_url,
+                  query = list(iri= glue("http://www.ebi.ac.uk/efo/{query_efo_id_underscore}")))
+      cont <- content(resp)
+      
+      input_label <- cont$`_embedded`$terms[[1]]$label
+      efo_ids <- c(query_efo_id,efo_ids)
+      efo_labels <- c(input_label, efo_labels)
+    }
+    
+    efo_df_l[[query_efo_id]] <- data.frame(efo_id = efo_ids,
+                                           efo_label=efo_labels)
+  }
+  efo_df <- bind_rows(efo_df_l) %>% distinct()
+  return(efo_df)
+} 
+```
+
+
+```{r ebi-efo-cvd}
+
+# A. All EFOs under CVD -------------------------------------------------------
+cvd_all_efo <- query_ebi_ols(rest_desc_url=efo_desc_rest_url, 
+                             page_size=500, 
+                             query_efo_ids = c("EFO:0000319", "EFO_0007654", "HP_0001626", "EFO_0004723"))
+
+
+# B. only selected EFOs relevant to vascular/atherosclerotic disease ----------
+# aim = focus on specificity (i.e. checked all expandable nodes for non-relevant subnodes)
+cvd_relevant_efo_lines <- readLines("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/GWAS/cvd_relevant_efo.txt")
+cvd_relevant_efo <- tibble(
+  efo_id = cvd_relevant_efo_lines %>%
+    str_match(.,pattern = "\\((.*)\\)") %>%
+    .[,2] %>%
+    gsub(., pattern = "_",replacement =  ":"),
+  efo_label = cvd_relevant_efo_lines %>%
+    str_match(.,pattern = "(.*) \\(.*\\)") %>%
+    .[,2] %>%
+    tolower(.)
+)
+
+# get subnodes per EFO, if any
+cvd_relevant_efo_desc <- list()
+for (efo in cvd_relevant_efo$efo_id){
+  print(efo)
+  cvd_relevant_efo_desc[[efo]] <- query_ebi_ols(rest_desc_url = efo_desc_rest_url,
+                                                page_size = 500,
+                                                query_efo_ids = efo)
+}
+cvd_relevant_efo_desc <- bind_rows(cvd_relevant_efo_desc)
+
+# add
+cvd_relevant_efo <- bind_rows(cvd_relevant_efo, cvd_relevant_efo_desc) %>%
+  distinct()
+
+```
+
+```{r ebi-efo-lipids-meas}
+lipids_meas_all_efo <- query_ebi_ols(rest_desc_url=efo_desc_rest_url,
+                                     rest_term_url = efo_term_rest_url,
+                                     get_input_labels = TRUE,    
+                                     page_size=500, 
+                                     query_efo_ids = "EFO:0004529")
+
+```
+
+```{r ebi-efo-lp-meas}
+lp_meas_all_efo <- query_ebi_ols(rest_desc_url=efo_desc_rest_url, 
+                                 rest_term_url = efo_term_rest_url,
+                                 get_input_labels = TRUE,   
+                                 page_size=500, 
+                                 query_efo_ids = c("EFO:0004732", "EFO:0008028", "EFO:0008029", "EFO:0008432"))
+
+```
+
+```{r ebi-efo-neuro}
+neuro_super_efos <- tribble(
+  ~efo_id, ~efo_label,
+  "EFO:0006514", "Alzheimer's disease biomarker measurement",
+  "EFO:0004464", "brain measurement",
+  "EFO:0005772", "neurodegenerative disease",
+  "HP:0000726", "dementia",
+  "EFO:0004346", "neuroimaging measurement",
+  "EFO:0009268", "family history of Alzheimer’s disease",
+  "HP_0001268", "cognitive decline"
+)
+
+neuro_all_efo <- query_ebi_ols(rest_desc_url=efo_desc_rest_url, 
+                               page_size=500, 
+                               query_efo_ids = neuro_super_efos$efo_id)
+
+neuro_all_efo <- bind_rows(
+  neuro_all_efo,
+  neuro_super_efos
+)
+
+```
+
+
+```{r save}
+saveRDS(cvd_all_efo, glue("{datadir}/cvd_all_efo.RDS"))
+saveRDS(cvd_relevant_efo, glue("{datadir}/cvd_relevant_efo.RDS"))
+saveRDS(lipids_meas_all_efo, glue("{datadir}/lipids_meas_all_efo.RDS"))
+saveRDS(lp_meas_all_efo, glue("{datadir}/lp_meas_all_efo.RDS"))
+saveRDS(neuro_super_efos, glue("{datadir}/neuro_all_efo.RDS"))
+```
+

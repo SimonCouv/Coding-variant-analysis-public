@@ -1,0 +1,825 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+library(readr)
+library(ensembldb)
+library(EnsDb.Hsapiens.v75)
+library(stringr)
+library(tidyverse)
+# library(plyranges)
+library(biomaRt)
+library(fuzzyjoin)
+library(data.table)
+library(glue)
+library(GenomicRanges)
+library(httr)
+library(ggrepel)
+library(cowplot)
+library(ggbeeswarm)
+library(formattable)
+library(knitr)
+library(kableExtra)
+library(AnnotationHub)
+
+source("map_peptides.R")
+
+figdir <- "/home/simon/Dropbox/Simon Mini Project/results/apolipo-variants-project/figs/"
+datadir <- "/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/"
+```
+
+```{r run-scripts}
+knitr::knit("EBI_EFO.Rmd")
+```
+
+
+```{r functions}
+
+# re-implementation of formattable::color_bar (# https://github.com/renkun-ken/formattable/issues/106)
+color_bar2 <- function (color = "lightgray", fun = "proportion", ...) 
+{
+  fun <- match.fun(fun)
+  formatter("span", style = function(x) style(display = "inline-block", 
+    `border-radius` = "4px", `padding-right` = "2px", 
+    `background-color` = csscolor(color), width = percent(fun(as.numeric(x), 
+      ...))))
+}
+
+
+ggplot_qual_colors <- function(n_colors){
+  d <- 360/n_colors
+  h <- cumsum(c(15, rep(d,n_colors - 1)))
+  hcl(h = h, c = 100, l = 65)
+}
+
+```
+
+```{r load_data}
+
+# agilent_apos_coding_snps <- read_tsv("/home/simon/OneDrive/KCL/Mayr_proteomics/data/agilent_apos_vep_coding") %>% unique(.)
+# mrm_apos_coding_snps <- read_tsv("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/mrm_apos_vep_coding") %>% unique(.)
+
+# Ensembl VEP tool (local) + REST API a2_freqs, allele-specific merge
+vep_coding_a2_freqs <- read_tsv("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/vep_coding_mafs") %>% select(-(1:3))
+
+# LD partners (r2>=0.95) of BIALLELIC coding rs in mrm apos, with ref = 1KG EUR population
+vep_coding_a2_freqs_ld_partners <- read_tsv('/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/ld_partners') %>%
+  select(-(2:3))
+names(vep_coding_a2_freqs_ld_partners)[1] <- "gene"
+
+# apo ID lookup table
+apo_peptides <- read_csv("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/mrm_apo_peptides.csv") %>%
+  mutate(Peptide_clean= gsub(Peptide, pattern = "[^A-Z]", replacement = ""))
+mrm_apos_id_map <- read_tsv("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/mrm_apos_id_map.csv") %>% 
+  set_names(c("uniprot", "ens_gene")) %>%
+  distinct()
+agilent_apo_peptides <- merge(mrm_apos_id_map, apo_peptides, by.x="uniprot", by.y="Protein") %>%
+  distinct()
+
+# all included now
+# setdiff(mrm_apos_id_map$uniprot, apo_peptides$Protein)
+# setdiff(apo_peptides$Protein, mrm_apos_id_map$uniprot)
+
+#GWAS and eQTL
+ebi_gwas <- fread("/home/simon/OneDrive/KCL/DILI_GWAS_Molokhia/input_data/gwas-catalog-associations_ontology-annotated.tsv")
+eqtl <- fread("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/GTEx_Analysis_v7_eQTL/Whole_Blood.v7.signif_variant_gene_pairs.txt.gz") %>%
+  mutate(stable_gene_id = str_replace(gene_id, pattern = "\\..*", replacement = ""))
+
+
+# see https://gtexportal.org/home/documentationPage
+# eqtl_egenes <- fread("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/GTEx_Analysis_v7_eQTL/Whole_Blood.v7.egenes.txt.gz") %>%
+#   mutate(stable_gene_id = str_replace(gene_id, pattern = "\\..*", replacement = ""))
+
+# EBI EFO
+cvd_all_efo <- readRDS(glue("{datadir}/cvd_all_efo.RDS"))
+cvd_relevant_efo <-readRDS(glue("{datadir}/cvd_relevant_efo.RDS"))
+lipids_meas_all_efo <-readRDS(glue("{datadir}/lipids_meas_all_efo.RDS"))
+lp_meas_all_efo <- readRDS(glue("{datadir}/lp_meas_all_efo.RDS"))
+neuro_super_efos <- readRDS(glue("{datadir}/neuro_all_efo.RDS"))
+
+
+```
+
+
+```{r filter-a2_freq_pop}
+
+# common coding a2_freqs in 1KG EUR
+vep_cc_afs_tmp <- vep_coding_a2_freqs %>% 
+  dplyr::filter(population == "1000GENOMES:phase_3:EUR",
+                second_allele_freq > 0.05,
+                biotype == "protein_coding")   #especially for splice variants: only on protein-coding tx (missense variants de facto on protein-coding tx)
+
+```
+
+```{r setup EnsDb}
+# GRCh38!!
+
+# fetch all annotations
+ah <- AnnotationHub()
+ahDb <- query(ah, "Homo sapiens", "EnsDb", 94)
+# ahDb[1]
+# View(cbind(
+#   ahDb$description,
+#   ahDb$title,
+#   ahDb$ah_id))
+
+#fetch annotations for Ensembl v94 human
+ah_id <- ahDb$ah_id[ahDb$title == "Ensembl 94 EnsDb for Homo sapiens"]
+ah_hs_94 <- ahDb[[ah_id]]   # can load from cache at /home/simon/.AnnotationHubGRCh38!!
+# View(as.data.frame(genes(ah_hs_94)))
+
+#fetch h38/GRCh38 ->  hg19/GRCh37 liftover file (see https://bioconductor.org/packages/release/bioc/vignettes/AnnotationHub/inst/doc/AnnotationHub-HOWTO.html#liftover-to-map-between-genome-builds)
+
+liftover_id <- ahDb$ah_id[ahDb$title == "hg38ToHg19.over.chain.gz"]
+liftover <- ahDb[[liftover_id]]   # can load from cache at /home/simon/.AnnotationHubGRCh38!!
+
+
+
+
+#not working
+# ah_hs_94_2_fromdb <- loadDb("/home/simon/.AnnotationHub/71669", "ensdb")
+
+# makeEnsembldbPackage(ah_hs_94)
+
+```
+
+
+```{r setup biomart}
+listMarts(host="http://grch37.ensembl.org")
+
+ens_mart <- useMart("ENSEMBL_MART_SNP", host="http://grch37.ensembl.org")
+ens_snp_grch37 <- useDataset("hsapiens_snp", ens_mart)
+
+ens_genes_grch37 <- useDataset("hsapiens_gene_ensembl", useMart("ENSEMBL_MART_ENSEMBL", host="http://grch37.ensembl.org"))
+
+
+ens_genes_grch38 <- useDataset("hsapiens_gene_ensembl", useMart("ENSEMBL_MART_ENSEMBL", host = "http://jan2019.archive.ensembl.org"))
+
+# 
+# View(listFilters(ens_snp_grch37))
+# View(listAttributes(ens_snp_grch37))
+
+
+
+```
+
+
+# Annotate/reformat
+
+```{r annotate-reformat-rs}
+
+# 1) transform and rename for backwards compatibilty with existing code
+# 2) annotate with uniprot name
+vep_cc_afs <- vep_cc_afs_tmp %>%
+  separate(location, into=c("chr_name", "bps"), sep = ":") %>%
+  separate(bps, into=c("chrom_start", "chrom_end")) %>%
+  mutate(chrom_end = ifelse(is.na(chrom_end), chrom_start, chrom_end)) %>%
+  mutate(chrom_strand = ifelse(strand == 1, "+", "-")) %>%
+  dplyr::rename("tx_id" = "feature", "a2_freq" = "second_allele_freq", "snp"="rs") %>%
+  merge(mrm_apos_id_map, by.x="gene", by.y="ens_gene") %>%
+  left_join(variant_names_long_GRCh37)
+
+
+
+# 3) collapse conseqs over transcripts
+vep_cc_afs_collapsed <- vep_cc_afs %>% 
+  group_by(uniprot, gene, snp, second_allele, a2_freq) %>%
+  summarise(
+    snp_aggregate_conseqs = paste0(unique(conseqs), collapse = ",") %>%
+      str_replace_all("_", " "))
+
+```
+
+```{r annotate-apos}
+# chiefly for gene length
+apo_gene_anno <- getBM(mart = ens_genes_grch37,
+            filters = c("ensembl_gene_id", "chromosome_name"),
+            values = list(ensembl_gene_id=unique(vep_cc_afs_collapsed$gene),
+                          chromosome_name=c(1:22, "X", "Y", "MT")),
+            attributes = c("ensembl_gene_id", "chromosome_name", "start_position", "end_position", "strand")) %>%
+  mutate(length=end_position-start_position+1,
+         chrom_strand = recode(strand, `1` = "+", `-1`="-"))
+
+# restrict agilent_apo_peptides to canonical chromosomes
+canonical <- getBM(mart = ens_genes_grch37,
+            filters = c("ensembl_gene_id", "chromosome_name"),
+            values = list(ensembl_gene_id=unique(agilent_apo_peptides$ens_gene),
+                          chromosome_name=c(1:22, "X", "Y", "MT")),
+            attributes = c("ensembl_gene_id"))
+agilent_apo_peptides <- agilent_apo_peptides %>% dplyr::filter(ens_gene %in% canonical$ensembl_gene_id)
+
+```
+
+# EFO
+
+```{r lipids-lipoprotein-overlap}
+intersect(lipids_meas_all_efo$efo_label, lp_meas_all_efo$efo_label)
+```
+
+
+# Coding vars per apo
+
+```{r}
+axistextsize <- 13
+tol21rainbow= c("#771155", "#AA4488", "#CC99BB", "#114477", "#4477AA", "#77AADD", "#117777", "#44AAAA", "#77CCCC", "#117744", "#44AA77", "#88CCAA", "#777711", "#AAAA44", "#DDDD77", "#774411", "#AA7744", "#DDAA77", "#771122", "#AA4455", "#DD7788")
+legend.cex = 15
+
+a2_freq_snps <-
+  vep_cc_afs_collapsed %>%
+  group_by(gene)%>%
+  mutate(n_per_gene = n())%>%
+  ggplot(aes(x=reorder(uniprot,-n_per_gene), y=a2_freq, color=snp_aggregate_conseqs))+
+  geom_point()+
+  ylim(c(0,0.5))+
+  theme_bw()+
+  geom_hline(yintercept = 0.05, color="red", alpha=0.6)+
+  theme(panel.grid.major.y = element_line(colour = "darkgrey"),
+        axis.text=element_text(size=axistextsize),
+        legend.position = "top",
+        legend.text=element_text(size=legend.cex),
+        legend.key.size = unit(legend.cex, units="pt"),
+        legend.title = element_text(size=legend.cex))+
+  geom_text_repel(aes(label=snp), direction="both", nudge_x = 0.03, size=4, min.segment.length = 0)+
+  xlab("")+
+  ylab("second allele frequency")+
+  scale_color_manual(values=c("#821414","#3A3066", "#208207","#42CEC2" ),
+                     limits = c("inframe deletion", "missense variant", "splice region variant","splice region variant,missense variant"), 
+                     name="coding consequences")+
+  # scale_color_discrete(name="coding consequences")+
+  coord_flip()+
+  guides(color=guide_legend(nrow=2))
+
+n_snps <- vep_cc_afs_collapsed %>%
+  group_by(uniprot, gene)%>%
+  summarise(n_per_gene = n())%>%
+  left_join(apo_gene_anno, by=c("gene"="ensembl_gene_id")) %>%
+  mutate(coding_snp_density = n_per_gene/length*1000) %>%
+  ggplot(aes(x=reorder(uniprot, -n_per_gene), y=n_per_gene, fill=coding_snp_density))+
+  geom_bar(stat = "identity")+
+  # geom_line(aes(x=reorder(uniprot, -n), y=coding_snp_density,color="red", group=1))+
+  coord_flip()+
+  ylab("n")+
+  xlab("")+
+  theme_bw()+
+  # scale_fill_gradient2(name="density (coding variants/1000 bp)", low="blue", high="red")
+  scale_fill_gradient(name="coding SNPs/kbp")+
+  theme(
+    # legend.position = c(0.6,0.85),
+    legend.position ="top",
+    axis.text.y=element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.text.x=element_text(size=axistextsize),
+    panel.grid.major.y = element_line(colour = "darkgrey"),
+    legend.title = element_text(size=legend.cex))+
+  guides(fill=guide_colorbar(title.position = "top"))
+
+
+  
+# ggMarginal(a2_freq_snps)
+# 
+# aligned_plt <- align_plots(n_snps, a2_freq_snps, align="h", axis="l") 
+# aligned_plt <- align_plots(n_snps, a2_freq_snps, align="h") 
+# plot_grid(n_snps, a2_freq_snps, align="h", axis = "lr")
+coding_snps_overview <- plot_grid(a2_freq_snps, n_snps, align="h", rel_widths = c(4,1))
+ggsave(coding_snps_overview, filename = glue("{figdir}/coding_variant_overview_v2.png"),
+       width = 310, height=200, units = "mm", dpi=900, device = "png")
+```
+
+
+
+# Overlap
+
+## Overlap with MRM peptides
+
+### Map peptides to genomic locations
+
+*See lost_pept and lost_tx results!!*
+
+```{r map-peptides}
+
+# # only apolipoprotein tx with common coding variants
+# cc_var_pept_mapped = map_peptides(protein_coding_tx = vep_cc_afs, protein_peptides = agilent_apo_peptides, get_coding_tx = FALSE)
+# saveRDS(cc_var_pept_mapped, glue("{datadir}/cc_var_pept_mapped_vep.RDS"))
+
+debug(map_peptides)
+
+saveRDS(mrm_pept_mapped_bak_ensdb75, glue("{datadir}/mrm_pept_mapped_bak_ensdb75.RDS"))
+
+# all apolipoprotein tx
+mrm_pept_mapped <- map_peptides(protein_coding_tx = dplyr::select(agilent_apo_peptides, ens_gene), 
+             protein_peptides = agilent_apo_peptides,
+             get_coding_tx = TRUE,
+             ens_mart_db = ens_genes_grch38,
+             ensdb = ah_hs_94)
+
+saveRDS(mrm_pept_mapped, glue("{datadir}/mrm_pept_mapped.RDS"))
+
+
+
+#debug
+# test <- map_peptides(protein_coding_tx = dplyr::select(agilent_apo_peptides, ens_gene), 
+#              protein_peptides = agilent_apo_peptides,
+#              get_coding_tx = TRUE,
+#              ens_mart_db = ens_genes_grch38,
+#              ensdb = ah_hs_94)
+
+
+
+# https://www.bioconductor.org/packages/devel/bioc/vignettes/ensembldb/inst/doc/coordinate-mapping.html#4_mapping_protein_coordinates_to_transcript_coordinates
+
+```
+
+
+```{r load-mrm-mapped}
+mrm_pept_mapped <- readRDS(glue("{datadir}/mrm_pept_mapped.RDS"))
+```
+
+
+### Assess mapping to genomic locations
+
+
+
+
+
+#### Lost tx
+
+
+Comparison results with GRCh37 (wrong) vs GRCh38 (corrected) ensemblDB:
+
+* GRCh37: two tx lost: these are in the GRCh38 database (therefore variants on them are retrieved by the upstream pipeline), but were not yet included in the GRCh37 database [both confirmed by contrasting the ensembl v95 and GRCh37 archive]
+    + ENST00000630701 (APOC3) - tx and protein found in GRCh38, mapping succesful
+    + ENST00000630130 (CFAH) - tx and protein found in GRCh38, but mapping failed
+* as a result 'lost tx' issue fixed by using GRCh38
+
+
+```{r lost-tx}
+
+# GRCh37
+mrm_pept_mapped_bak_ensdb75$pept_prot_pos$ENSG00000000971$ENST00000630130
+mrm_pept_mapped_bak_ensdb75$ENSG00000110245$ENST00000630701
+
+# GRCh38
+mrm_pept_mapped$pept_prot_pos$ENSG00000000971$ENST00000630130
+mrm_pept_mapped$pept_prot_pos$ENSG00000110245$ENST00000630701
+
+# mapping failure for ENST00000630130 explains empty list returned in pept_prot_pos
+View(mrm_pept_mapped$lost_pepts)
+```
+
+
+
+
+#### CDS not ok
+
+
+From coordinate mapping vignette, https://bioconductor.org/packages/release/bioc/vignettes/ensembldb/inst/doc/coordinate-mapping.html:
+
+" As an additional complication, the coding region might not be complete for some transcripts and either their 3’ or 5’ ends (or both) are not defined (or can not be mapped to the genome). In such cases, the length of the CDS does not match the length of the annotated protein sequence. Reported position mappings between proteins and transcripts might for that particular cases not be correct. In such cases FALSE is reported in a column named "cds_ok" in the results from functions mapping to and from protein coordinates."
+
+Deal with this by first filtering out all cases of cds_ok=FALSE where there is another transcript-protein pair for the same peptide, where cds_ok=TRUE and the mapped genomic coordinates are identical.
+
+Remaining cases:
+
+* ELDESLQVAER (CLUS/APOJ): confirmed two alternative locations on lines with cds_ok==FALSE as incorrect using Ensembl genome browser
+* ASSIIDELFQDR (CLUS/APOJ): confirmed one alternative location on lines with cds_ok==FALSE as incorrect using Ensembl genome browser
+
+*In conclusion:* 
+
+* For purpose of *overlapping with rs genomic locations*: all lines with cds_ok==FALSE should be removed, since they give either redundant or wrong genomic locations
+* For purpose of *assessing protein isoform detectability with a certain peptide*:  cds_ok status not important (genomic location not important). What matters is that the peptide is contained in the protein isoform.
+
+
+```{r cds-not-ok}
+
+# overview of the successfully mapped peptides and their genomic coordinates, irrespective of cds_ok status
+success_peptides_cdsok <- mrm_pept_mapped$pept_prot_pos %>%
+  modify_depth(3, "genome_level") %>%
+  flatten() %>% flatten() %>% flatten() %>%
+  map(~as_tibble(.x)) %>%
+  bind_rows(.id="peptide")
+
+
+list_bad_pepts <- function(success_peptides_cdsok){
+  bad_pepts <- list()
+  for (peptide in unique(success_peptides_cdsok$peptide)) {
+    
+    print(peptide)
+    # if (peptide=="ASSIIDELFQDR")
+      # browser()
+    
+    if (any(success_peptides_cdsok$cds_ok==FALSE)) {
+      pept_lines <- success_peptides_cdsok[success_peptides_cdsok$peptide==peptide,]
+      faillines <- pept_lines[pept_lines$cds_ok==FALSE,]
+      goodlines <- pept_lines[pept_lines$cds_ok==TRUE,]
+      for (failtx in faillines$tx_id){
+        failline <- faillines[faillines$tx_id == failtx,]
+        starts_equal <- goodlines$start == failline$start
+        ends_equal <- goodlines$end == failline$end
+        chrs_equal <- goodlines$seqnames == failline$seqnames
+        if (!any(starts_equal & ends_equal & chrs_equal)){
+          bad_pepts[[peptide]] <- pept_lines
+        }
+        
+      }
+    }
+  }
+  return(bind_rows(bad_pepts))
+}
+
+#test function
+success_peptides_cdsok2 <- rbind(success_peptides_cdsok[1,], success_peptides_cdsok)
+success_peptides_cdsok2$start[1] <- 196725140
+success_peptides_cdsok2$cds_ok[1] <- FALSE
+list_bad_pepts(success_peptides_cdsok2)
+
+#apply to original data:
+list_bad_pepts(success_peptides_cdsok) %>% View(.)
+
+```
+
+
+#### Lost peptides
+
+Main figure:
+
+```{r protein-isoform-detectability-per-peptide-per-apo}
+
+n_prot_iso <- mrm_pept_mapped$mapping_success_overview %>%
+  left_join(distinct(mrm_apos_id_map)) %>%
+  arrange(uniprot) %>%
+  mutate(
+     p_id = factor(p_id, levels = unique(p_id), ordered=TRUE),
+     Peptide_clean = factor(Peptide_clean, levels = unique(Peptide_clean), ordered=TRUE),
+     uniprot_short = str_match(uniprot, pattern = "(.*)_HUMAN")[,2]
+  ) %>%
+  group_by(uniprot) %>%
+  summarise(n_prot_iso = n_distinct(p_id))
+
+
+# ggplot
+mrm_pept_mapped$mapping_success_overview %>%
+  left_join(distinct(mrm_apos_id_map)) %>%
+  arrange(uniprot) %>%
+  mutate(
+     p_id = factor(p_id, levels = unique(p_id), ordered=TRUE),
+     Peptide_clean = factor(Peptide_clean, levels = unique(Peptide_clean), ordered=TRUE),
+     uniprot_short = str_match(uniprot, pattern = "(.*)_HUMAN")[,2]
+  ) %>%
+  ggplot(aes(x=reorder(p_id, uniprot), 
+             y=reorder(Peptide_clean, uniprot), 
+             fill=mapped_success))+
+  geom_tile()+
+  scale_fill_manual(limits=c(FALSE, TRUE), values = c("#f49a9a", "#9bfc85"))+
+  facet_grid(uniprot_short~., drop = TRUE, scales="free", switch="y", space = "free")+
+  # facet_wrap(~uniprot_short, drop = TRUE, scales="free")+
+  theme_bw()+
+  theme(
+    panel.spacing = unit(0.2, "lines"),
+    # panel.grid.major.x = element_line(size = 0.2, color="darkgrey"),
+    panel.grid.major.x =  element_blank(),
+    panel.grid.major.y = element_blank(),
+    legend.position = "none",
+    strip.placement = "outside",
+    strip.text.y = element_text(angle=180),
+    axis.text.x = element_text(angle = 90, hjust=0, vjust=0.4)
+  )+
+  xlab("")+
+  ylab("")+
+  geom_vline(xintercept = cumsum(n_prot_iso$n_prot_iso) + 0.5, size=0.2,color="black")+
+  geom_vline(xintercept = 1:sum(n_prot_iso$n_prot_iso) + 0.5, size=0.2,color="darkgrey")
+
+
+
+
+```
+
+
+
+### Overlap pepide genomic locations with rs positions
+
+```{r rs-pept}
+
+#peptides with cds_ok == TRUE only, see above
+pept_genomic_loc <- success_peptides_cdsok %>%
+  dplyr::filter(cds_ok)
+
+# overlap with common coding snps
+apo_cc_mrm <- pept_genomic_loc %>%
+  left_join(vep_cc_afs, by=c("seqnames" = "chr_name")) %>%
+  dplyr::filter(chrom_start > start, chrom_end < end)
+
+
+vep_coding_anno <- vep_coding_a2_freqs %>%
+  dplyr::filter(biotype == "protein_coding") %>%
+  separate(location, into=c("chr_name", "bps"), sep = ":") %>%
+  separate(bps, into=c("chrom_start", "chrom_end")) %>%
+  mutate(chrom_end = ifelse(is.na(chrom_end), chrom_start, chrom_end)) %>%
+  mutate(chrom_strand = ifelse(strand == 1, "+", "-")) %>%
+  dplyr::rename("tx_id" = "feature", "a2_freq" = "second_allele_freq", "snp"="rs") %>%
+  dplyr::filter(a2_freq > 0.005) %>%
+  merge(mrm_apos_id_map, by.x="gene", by.y="ens_gene")
+
+
+# overlap with all coding snps, irrespective of a2_freq
+apo_coding_mrm <- pept_genomic_loc %>%
+  left_join(vep_coding_anno, by=c("seqnames" = "chr_name")) %>%
+  dplyr::filter(chrom_start > start, chrom_end < end) %>%
+  arrange(desc(a2_freq)) %>%
+  distinct(uniprot, peptide, snp, a2_freq, population, conseqs)
+
+# other MRM variants than LGADMEDVCGR
+apo_coding_mrm_new <- apo_coding_mrm %>%
+  dplyr::filter(peptide != "LGADMEDVCGR")
+
+# other MRM variants than LGADMEDVCGR in EUR + subpopulations
+apo_coding_mrm_EUR <- apo_coding_mrm %>%
+  # dplyr::filter(peptide != "LGADMEDVCGR") %>%
+  dplyr::filter(
+    (str_detect(population, pattern = "EUR|CEU|TSI|FIN|IBS") & 
+       str_detect(population, pattern = "1000GENOMES")) | 
+      
+      (str_detect(population, pattern = "NFE|BGR|EST|NWE|SEU|SWE|ONF|FIN") & 
+       str_detect(population, pattern = "gnomADg")) | 
+         
+         (str_detect(population, pattern = "CEU|TSI") & 
+       str_detect(population, pattern = "HapMap"))
+  )
+
+View(head(apo_coding_mrm,1000))
+
+
+```
+
+
+
+## LD expand for overlap with GWAS and eQTL
+
+```{r}
+ld_extended<- vep_coding_a2_freqs_ld_partners %>%
+  dplyr::select(variation1, variation2) %>%
+  bind_rows(data.frame(variation1 = unique(vep_cc_afs$snp), #including those which may not have ld partners
+                       variation2 = unique(vep_cc_afs$snp))) %>%
+  arrange(variation1)
+
+# note reduction due to a2_freq (and biotype) filtering
+mean(ld_extended$variation1 %in% unique(vep_cc_afs$snp))
+mean(ld_extended$variation2 %in% unique(vep_cc_afs$snp))
+
+
+```
+
+## Overlap with GTEx eQTLs
+
+Problem: 
+GTEx: long variant IDs
+ld-partners (from REST ld window): rs IDs
+
+position -(1:n)- variant type (rsID) -(1:n)- variant allele
+
+Because long variant naming rules GTEx unclear, approach is to use GTEx positions and overlap with ld-partner positions.
+
+
+### build GTEx GRCh37 long variant names for expanded rs IDs
+
+```{r}
+ld_partner_anno_GRCh37 <- getBM(mart = ens_snp_grch37,
+            filters = c("snp_filter", "chr_name"),
+            values = list(snp_filter=unique(ld_extended$variation2),
+                          chr_name=c(1:22, "X", "Y", "MT")),
+            attributes = c("refsnp_id", "chr_name", "chrom_start", "chrom_end", "chrom_strand", "allele", "minor_allele")) %>%
+  mutate(chr_name = as.character(chr_name))
+  
+eqtl_sep <- eqtl %>%
+  separate(variant_id, into = c("chr", "pos", "a1", "a2", "dummy")) %>%
+  dplyr::select(-dummy) %>%
+  mutate(pos = as.numeric(pos))
+```
+
+
+### Effect of LD expand
+
+Only about 19% of eQTLs are from core, rest are ld-partners
+
+```{r}
+#prop of GWAS snps from cc = 25%
+vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>% 
+  inner_join(ld_partner_anno_GRCh37, by=c("variation2"="refsnp_id"), suffix=c("", "_var2")) %>%
+  inner_join(dplyr::select(eqtl_sep,-maf), by=c("chr_name_var2"="chr", "chrom_start_var2"="pos", "gene"="stable_gene_id")) %>%
+  dplyr::select(gene, a2_freq, conseqs, pval_nominal, pval_beta, variation2) %>%
+  distinct(variation2) %>%
+  mutate(var2_cc = variation2 %in% vep_cc_afs$snp) %>%
+  summarise(prop_cc = mean(var2_cc),
+            n_snps= n())
+
+```
+
+
+### Annotate
+
+
+```{r rs-eqtl}
+
+apo_coding_snp_eqtl <- vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>% 
+  inner_join(ld_partner_anno_GRCh37, by=c("variation2"="refsnp_id"), suffix=c("", "_var2")) %>%
+  inner_join(dplyr::select(eqtl_sep,-maf), by=c("chr_name_var2"="chr", "chrom_start_var2"="pos", "gene"="stable_gene_id")) %>%
+  dplyr::select(gene, a2_freq, conseqs, pval_nominal, pval_beta, snp, variation2) %>%
+  merge(mrm_apos_id_map, by.x="gene", by.y="ens_gene") %>%
+  dplyr::select(uniprot,snp, a2_freq, conseqs, variation2, everything())
+
+write_tsv(apo_coding_snp_eqtl, "/home/simon/OneDrive/KCL/Mayr_proteomics/results/apo_coding_snp_eqtl.tsv")
+
+ggplot(apo_coding_snp_eqtl, aes(x=chrom_start, y=pval_nominal, color=reorder(uniprot, -a2_freq)))+
+  geom_point(size=3)+
+  geom_text(aes(label=snp), hjust=-0.5)+
+  ylim(c(0,0.5))+
+  geom_hline(yintercept = 0.05, color="red")+
+  xlab("")+
+  ylab("minor allele frequency")+
+  theme_bw()+
+  scale_color_discrete(name="apolipoprotein")
+ggsave("/home/simon/OneDrive/KCL/Mayr_proteomics/results/apo_coding_snp_eqtl.png")
+
+
+```
+
+## Overlap with EBI GWAS
+
+### Effect of LD expansion
+
+
+Number of snps (i.e. variation2) with >0 GWAS hits increases strongly (only 26% is cc).
+
+However, majority (61%) of GWAS annotations is still to cc snps.
+
+This corresponds to higher number of GWAS annotations per snp for cc than non-cc snps
+
+```{r ld-expansion-effect}
+#prop of GWAS snps from cc = 25%
+vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>%
+  inner_join(ebi_gwas, by=c("variation2"="SNPS")) %>%
+  distinct(variation2) %>%
+  mutate(var2_cc = variation2 %in% vep_cc_afs$snp) %>%
+  summarise(prop_cc = mean(var2_cc),
+            n_snps= n())
+
+# prop of GWAS hits from cc
+vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>%
+  inner_join(ebi_gwas, by=c("variation2"="SNPS")) %>%
+  mutate(var2_cc = variation2 %in% vep_cc_afs$snp) %>%
+  summarise(prop_cc = mean(var2_cc),
+            n_hits= n())
+
+# mean number of GWAS annotations per snp, by cc versus non-cc
+vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>%
+  distinct(gene, a2_freq, variation2) %>% #to collapse over tx
+  inner_join(ebi_gwas, by=c("variation2"="SNPS")) %>% 
+  separate_rows(MAPPED_TRAIT, MAPPED_TRAIT_URI, sep = ",") %>%
+  distinct(gene, a2_freq, variation2, `DISEASE/TRAIT`, MAPPED_TRAIT, MAPPED_TRAIT_URI, PUBMEDID) %>% 
+  mutate(var2_cc = variation2 %in% vep_cc_afs$snp) %>%
+  group_by(variation2, var2_cc) %>%
+  summarise(n_hits_per_snp = n()) %>%
+  group_by(var2_cc) %>%
+  summarise(n_hits = sum(n_hits_per_snp),
+            mean_anno_per_var2 = mean(n_hits_per_snp),
+            median_anno_per_var2 = median(n_hits_per_snp))
+
+# same, visually
+vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>%
+  distinct(gene, a2_freq, variation2) %>% #to collapse over tx
+  inner_join(ebi_gwas, by=c("variation2"="SNPS")) %>% 
+  separate_rows(MAPPED_TRAIT_URI, sep = ",") %>%
+  distinct(gene, a2_freq, variation2, `DISEASE/TRAIT`, MAPPED_TRAIT, MAPPED_TRAIT_URI, PUBMEDID) %>% # by variation2
+  mutate(var2_cc = variation2 %in% vep_cc_afs$snp) %>%
+  group_by(variation2, var2_cc) %>%
+  summarise(n_hits_per_snp = n()) %>%
+  mutate(var2_cc_text = ifelse(var2_cc, "common-coding", "non-coding in LD")) %>%
+  ggplot(aes(x=var2_cc_text, y=n_hits_per_snp)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.05, height = 0)+
+  EnvStats::stat_n_text()+
+  ggsignif::geom_signif(comparisons = list(c( "common-coding", "non-coding in LD")))+
+  theme_gray()+
+  ylab("number of distinct GWAS annotations per SNP")+
+  xlab("")
+
+```
+
+### Most important traits, in terms of EFO
+
+```{r rs-gwas}
+
+# coding rs with gwas
+apo_coding_snp_gwas <- vep_cc_afs %>%
+  inner_join(ld_extended, by=c("snp" = "variation1")) %>%
+  inner_join(ebi_gwas, by=c("variation2"="SNPS")) %>%
+  separate_rows(MAPPED_TRAIT, MAPPED_TRAIT_URI, sep = ",") %>%
+  distinct(gene, a2_freq, snp, `DISEASE/TRAIT`, MAPPED_TRAIT, MAPPED_TRAIT_URI, PUBMEDID) %>%  # by snp
+  merge(distinct(mrm_apos_id_map), by.x="gene", by.y="ens_gene") %>%
+  mutate(efo_id = str_match(MAPPED_TRAIT_URI, pattern = "/([^/]*)$")[,2] %>%
+           gsub(., pattern = "_", replacement = ":"),
+         efo_cvd = efo_id %in% cvd_all_efo$efo_id,
+         efo_lp = efo_id %in% lp_meas_all_efo$efo_id,
+         efo_lipids = efo_id %in% lipids_meas_all_efo$efo_id,
+         efo_lp_lipids = (efo_lp | efo_lipids),
+         efo_neuro = efo_id %in% neuro_all_efo$efo_id,
+         efo_other = !(efo_cvd| efo_lp| efo_lipids| efo_neuro),
+         uniprot_short = str_match(uniprot, pattern = "(.*)_HUMAN")[,2]) 
+
+# overlap between lp and lipids -> solution: use combined group lp_lipids
+row_n_groups <- apo_coding_snp_gwas %>% dplyr::select(efo_cvd:efo_other) %>% rowSums()
+table(row_n_groups)
+apo_coding_snp_gwas[row_n_groups > 1,]
+
+```
+
+Check whether any EFOs in "other" catergory should be including in one of the other categories.
+
+```{r missed-EFOs}
+apo_coding_snp_gwas %>%
+  dplyr::filter(efo_other) %>%
+  View(.)
+
+```
+
+
+```{r efo-breakdown}
+table(apo_coding_snp_gwas$uniprot)
+
+p_apo_efo <- apo_coding_snp_gwas %>%
+  distinct(uniprot_short, snp, efo_id, efo_cvd, efo_lp_lipids, efo_neuro, efo_other) %>% 
+  group_by(uniprot_short) %>%
+  summarise_at(c("efo_cvd", "efo_lp_lipids", "efo_neuro", "efo_other"), sum) %>%
+  set_names(names(.) %>% gsub(.,pattern = "efo_", replacement = "")) %>%
+  dplyr::rename("CVD"="cvd", "lipids or LP"="lp_lipids") %>%
+  gather(EFO, n, -uniprot_short) %>%
+  ggplot(aes(x=uniprot_short, y=n, fill=EFO))+
+  geom_bar(stat="identity")+
+  coord_flip()+
+  theme_bw()+
+  scale_fill_manual("EFO group",
+                    limits=c("other", "neuro", "lipids or LP", "CVD"),
+                    values = c("lightgrey", rev(ggplot_qual_colors(4))))+
+  ylab("number of GWAS associations")+
+  xlab("")+
+  theme(
+    legend.position = c(0.7,0.8)
+  )
+```
+
+## Most important common coding snps
+
+These are common coding SNPs which might be considered for inclusion in MRM.
+
+Possible criteria: MAF, number of overall GWAS annos, number of specific EFO GWAS annos, eQTL
+
+```{r most-important-cc}
+
+p_important_cc <- apo_coding_snp_gwas %>%
+  distinct(uniprot, a2_freq, snp, efo_id, efo_cvd, efo_lp, efo_lipids, efo_neuro, efo_other) %>%
+  group_by(uniprot, a2_freq, snp) %>%
+  summarise(n_efo = n_distinct(efo_id),
+            n_cvd = sum(efo_cvd),
+            n_lp = sum(efo_lp),
+            n_lipids = sum(efo_lipids),
+            n_neuro = sum(efo_neuro),
+            n_interest = n_cvd + n_lp + n_lipids) %>%
+  full_join(distinct(apo_coding_snp_eqtl, snp, a2_freq, uniprot)) %>% 
+  mutate_at(.vars=vars(n_efo:n_interest), .funs= ~replace_na(., replace = 0)) %>%
+  mutate(eQTL = snp %in% unique(apo_coding_snp_eqtl$snp),
+         uniprot_short = str_match(uniprot, pattern = "(.*)_HUMAN")[,2]) %>%
+  dplyr::filter(n_interest > 0 | eQTL==TRUE) %>% 
+  
+  ggplot(aes(y=a2_freq, x=n_interest, color=uniprot_short, shape=eQTL))+
+  geom_point(size=2)+
+  # ylim(c(0,0.5))+
+  # geom_hline(yintercept = 0.05, color="red", alpha=0.6)+
+  geom_text_repel(aes(label=snp))+
+  scale_color_discrete("protein")+
+  scale_shape_manual(values=c(1,2))+
+  ylab("second allele frequency")+
+  xlab("number of CVD-relevant GWAS associations") +  #in both cc and respective ld-partners, cvd-relevant=cvd,lp,lipds, neuro
+  theme_bw()+
+  ylim(c(0,0.5))+
+  theme(
+    legend.position = c(0.85,0.60)
+  )
+
+
+```
+
+
+```{r overview-fig}
+plot_grid(p_apo_efo, p_important_cc, rel_widths = c(1.15,2), labels = "AUTO")
+```
+
+

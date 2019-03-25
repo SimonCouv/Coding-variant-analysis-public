@@ -1,0 +1,1285 @@
+---
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    collapsed: false
+    code_folding: hide
+    number_sections: true
+    self_contained: yes
+editor_options: 
+  chunk_output_type: console
+bibliography: /home/simon/google_drive/Zotero/synced_bibtex_library.bib
+---
+
+
+```{r setup, include=FALSE}
+library(readxl)
+library(readr)
+library(tidyverse)
+# library(tidylog)
+library(data.table)
+library(glue)
+library(Peptides)
+library(EnvStats)
+library(GGally)
+library(ggridges)
+library(rlang)
+library(knitr)
+library(ggsignif)
+library(condformat)
+
+# https://stackoverflow.com/questions/27992239/knitr-include-figures-in-report-and-output-figures-to-separate-files
+knitr::opts_chunk$set(message = FALSE, dev = 'png', fig.path = "/home/simon/Dropbox/Simon Mini Project/results/apolipo-variants-project/figs/")
+```
+
+
+```{r functions}
+
+scatter_smooth <- function(data, mapping,size=4, corfnc = "spearman"){
+  x_name <- quo_text(mapping$x)
+  y_name <- quo_text(mapping$y)
+  x_pos = 0.5*(max(data[,x_name], na.rm = TRUE)-min(data[,x_name], na.rm = TRUE))
+  y_pos =  0.9*(max(data[,y_name], na.rm = TRUE)-min(data[,y_name], na.rm = TRUE))
+  sp_cor = round(cor(data[,x_name], data[,y_name], 
+               method = corfnc, 
+               use = "pairwise.complete.obs"),
+               digits=3
+  )
+  cor_prefix <- substr(corfnc,1,2)
+  
+  n <- nrow(data %>% dplyr::select(c(x_name, y_name)) %>% drop_na())
+  ggplot(data=data,mapping=mapping)+
+    geom_point(size=0.5, alpha=0.3)+
+    geom_smooth(alpha=0.3, color="black", size=0.5)+
+    # geom_smooth(alpha=0.3, color="black", size=0.5, method = "gam", formula = y ~ s(x, bs = "cs"))+
+    annotate("text", Inf, Inf, label=sprintf("n=%s\n%s cor=%s",n, cor_prefix,sp_cor),vjust = "inward", hjust = "inward",
+             size=size)
+    # stat_n_text(aes(x=10,y=10, group="combo"))
+}
+scatter_no_smooth <- function(data, mapping,size=4){
+  x_name <- quo_text(mapping$x)
+  y_name <- quo_text(mapping$y)
+  x_pos = 0.5*(max(data[,x_name], na.rm = TRUE)-min(data[,x_name], na.rm = TRUE))
+  y_pos =  0.9*(max(data[,y_name], na.rm = TRUE)-min(data[,y_name], na.rm = TRUE))
+  # sp_cor = round(cor(data[,x_name], data[,y_name], 
+  #              method = "spearman", 
+  #              use = "pairwise.complete.obs"),
+  #              digits=3
+  # )
+  
+  n <- nrow(data %>% dplyr::select(c(x_name, y_name)) %>% drop_na())
+  ggplot(data=data,mapping=mapping)+
+    geom_point(size=0.5, alpha=0.3)+
+    # geom_smooth(alpha=0.3, color="black", size=0.5)+
+    # geom_smooth(alpha=0.3, color="black", size=0.5, method = "gam", formula = y ~ s(x, bs = "cs"))+
+    annotate("text", Inf, Inf, label=sprintf("n=%s\n",n, sp_cor),vjust = "inward", hjust = "inward",
+             size=size)
+    # stat_n_text(aes(x=10,y=10, group="combo"))
+}
+scatter_smooth_runorder <- function(data, mapping){
+  x_name <- quo_text(mapping$x)
+  y_name <- quo_text(mapping$y)
+  x_pos = 0.5*(max(data[,x_name], na.rm = TRUE)-min(data[,x_name], na.rm = TRUE))
+  y_pos =  0.9*(max(data[,y_name], na.rm = TRUE)-min(data[,y_name], na.rm = TRUE))
+  n <- nrow(data %>% dplyr::select(c(x_name, y_name)) %>% drop_na())
+  ggplot(data=data,mapping=mapping)+
+    geom_point(size=0.5, alpha=0.3, aes(color=run_order))+
+    geom_smooth(alpha=0.3, color="black", size=0.5)+
+    scale_color_continuous(low="blue", high="red")+
+    annotate("text", Inf, Inf, label=paste0("n= ",n),vjust = "inward", hjust = "inward")
+    # stat_n_text(aes(x=10,y=10, group="combo"))
+}
+
+bar_diag <- function(data, mapping, bins=30, size=4){
+  x_name <- quo_text(mapping$x)
+  x_pos = 0.8*(max(data[,x_name], na.rm = TRUE)-min(data[,x_name], na.rm = TRUE))
+  n <- nrow(data %>% dplyr::select(c(x_name)) %>% drop_na())
+  ggplot(data=data,mapping=mapping)+
+    geom_histogram(bins=bins)+
+    annotate("text", Inf, Inf, label=paste0("n= ",n),vjust = "inward", hjust = "inward", size=size)
+}
+bar_diag_rug <- function(data, mapping, bins=30, size=4){
+  x_name <- quo_text(mapping$x)
+  x_pos = 0.8*(max(data[,x_name], na.rm = TRUE)-min(data[,x_name], na.rm = TRUE))
+  n <- nrow(data %>% dplyr::select(c(x_name)) %>% drop_na())
+  ggplot(data=data,mapping=mapping)+
+    geom_histogram(bins=bins)+
+    geom_rug()+
+    annotate("text", Inf, Inf, label=paste0("n= ",n),vjust = "inward", hjust = "inward", size=size)
+}
+
+spearman_cor <- function(data, mapping){
+  x_name <- quo_text(mapping$x)
+  y_name <- quo_text(mapping$y)
+}
+
+density_rug_diag <- function(data, mapping, bw=0.15){
+  x_name <- quo_text(mapping$x)
+  x_pos = 0.8*(max(data[,x_name], na.rm = TRUE)-min(data[,x_name], na.rm = TRUE))
+  n <- nrow(data %>% dplyr::select(c(x_name)) %>% drop_na())
+  ggplot(data=data,mapping=mapping)+
+    geom_density(bw=bw)+
+    geom_rug()+
+    annotate("text", Inf, Inf, label=paste0("n= ",n),vjust = "inward", hjust = "inward")
+}
+
+```
+
+# Preprocessing
+
+```{r load-data, include=FALSE}
+apo_peptides <- read_csv("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/mrm_apo_peptides.csv") %>%
+  mutate(Peptide_clean= gsub(Peptide, pattern = "[^A-Z]", replacement = ""))
+mrm_apos_id_map <- read_tsv("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/data/mrm_apos_id_map.csv") %>% 
+  set_names(c("uniprot", "ens_gene")) %>%
+  distinct()
+agilent_apo_peptides <- merge(mrm_apos_id_map, apo_peptides, by.x="uniprot", by.y="Protein") %>%
+  distinct()
+
+
+# Bruneck
+# rerun received 20/03 includes variant peptides (first run only spectroDive peptides)
+bruneck_rerun_apoa <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/multi-omics-project/input_data/bruneck/APOA in Bruneck.xlsx") %>%
+  set_names(c("row_label", names(.)[2:5], "ratio")) %>%
+  dplyr::filter(!str_detect(row_label, "repeat"))
+
+
+#EVA
+eva <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/EVA/EVArepeat_runwise_all_raw_exports_20180820.xlsx",na=c("NaN", "Not Detectable"))
+eva_wl <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/EVA/EVArepeat_worklist.xlsx")
+names(eva) <- names(eva) %>% tolower(.) %>% gsub(., pattern = "\\.", replacement = "_")
+names(eva_wl)<- c("run_order", "sample_name", "sample_pos", "method", "data_file", "inj_vol_muL")
+
+# man standard
+eva_conc <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/EVA/Ultimate_EVA_info_file_for_Simon_20190214.xlsx", sheet = "conc_all_plates_clean", col_names = TRUE, skip=1) %>%
+  setNames(c(tolower(names(.)[1:5]),names(.)[6:30]))
+eva_linreg_data <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/EVA/Ultimate_EVA_info_file_for_Simon_20190214.xlsx", sheet = "regression_data")%>%
+  setNames(c("sample", "lh_ratio", "npa_light"))
+eva_bovin_npa <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/EVA/Ultimate_EVA_info_file_for_Simon_20190214.xlsx", sheet = "bovin_npa_clean") %>%
+  dplyr::select(-one_of(c("LGADM[+16]EDVR", "LGVDM[+16]EDVC[+57]GR", "LSQLQTYMI"))) %>%     # remove peptides without heavy reference from triplets (light, heavy, modified peptide) e.g. (LGADMEDVR l, LGADMEDVR h, LGADM[+16]EDVR)
+  setNames(gsub(names(.), pattern = "[^A-Za-z]", replacement = ""))
+
+
+# PROCARDIS MASS SPEC
+procardis <- fread("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/procardis/Procardis_Apolipoproteins_20180210.tsv",
+                   na.strings=c("NaN", "Not Detectable"))
+procardis_wl <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/procardis/Procardis_worklist.xlsx")
+names(procardis) <- names(procardis) %>% tolower(.) %>% gsub(., pattern = "\\.", replacement = "_")
+names(procardis_wl) <- c("run_order", "sample_name", "sample_pos", "method", "data_file", "inj_vol_muL")
+
+#PROCARDIS UCSD
+procardis_ucsd <- read_xlsx("/home/simon/OneDrive/KCL/Mayr_proteomics/apolipo-variants-project/input_data/procardis/PROCARDIS UCSD 250 Lp(a) values.xlsx", skip = 5)
+names(procardis_ucsd) <- c("study_id", "cryovial_id", "ucsd_lpa_conc")
+
+#PEPTIDES OF INTEREST
+peptides_oi <- c("VTEPISAESGEQVER", "LGADMEDVCGR")
+
+
+```
+
+
+Note: "Not Detectable" was set to NA, same as "NaN" for both EVA and Procardis. "Not Detectable" tracks qvalue below threshold
+
+
+```{r preprocessing}
+
+# parameters --------------------------------------------------------------------
+qval_cutoff = 1e-3
+
+
+# process EVA --------------------------------------------------------------------
+
+eva_ms <- eva %>%
+  dplyr::select(r_filename:eg_referencetotalpeakarea, eg_qvalue) %>%
+  distinct() %>%   #remove double rows after targetgroup-specific columns have been dropped
+  setNames(str_replace(names(.),pattern = "eg_", replacement = "")) %>%
+  rename("filename" = "r_filename") %>%
+  mutate(
+    filename = str_replace(filename, pattern = "\\.d", replacement = ""),
+    cleansequence= paste0(gsub(modifiedsequence, pattern = "[^A-Z]", replacement = "")),
+    cleansequence_long = recode(cleansequence, 
+                                GTYSTTVTGR = "GTYSTTVTGR_KIV1_2_3_5",
+                                LFLEPTQADIALLK = "LFLEPTQADIALLK_protease_like",
+                                NPDAVAAPYCYTR = "NPDAVAAPYCYTR_KIV1_2",
+                                TPAYYPNAGLIK = "TPAYYPNAGLIK_KIV3"),
+    absoluteamount = ifelse(qvalue < qval_cutoff, absoluteamount, NA),
+    proteinname = gsub(proteinname, pattern = "_HUMAN", replacement = "")) %>%
+  unite(protein_pept, proteinname, cleansequence, sep="_", remove=FALSE)%>%
+  unite(protein_pept_long, proteinname, cleansequence_long, sep="_", remove=FALSE) %>%
+  left_join(eva_wl, by=c("filename" = "sample_name")) %>%
+  arrange(run_order, proteinname, cleansequence_long)
+
+# assign light and heavy tags to column names of bovin-normalised absolute peak areas
+pept_names <- names(eva_bovin_npa[,-1])
+pept_names_lh <- pept_names
+for (pept in unique(pept_names)){
+  stopifnot(sum(pept_names == pept) < 3)
+  if (sum(pept_names == pept) > 1){
+    pos <- which(pept_names == pept)
+    mw <- eva_bovin_npa[1, pos+1]
+    heavy_index <- (mw[2] > mw[1]) + 1
+    pos_heavy <- pos[heavy_index]
+    pos_light <- pos[-heavy_index]
+    pept_names_lh[pos_heavy] <- paste0(pept, "_heavy")
+    pept_names_lh[pos_light] <- paste0(pept, "_light")
+  }
+}
+names(eva_bovin_npa) <- c("sample", pept_names_lh)
+eva_bovin_npa <- dplyr::filter(eva_bovin_npa, sample != "TG.Q1") %>% 
+  mutate(sample=gsub(sample, pattern = "\\.d", replacement = ""))
+
+
+# process Procardis--------------------------------------------------------------------
+procardis_ms <- procardis %>%
+  mutate(
+    cleansequence= paste0(gsub(modifiedsequence, pattern = "[^A-Z]", replacement = "")),
+    cleansequence_long = recode(cleansequence, 
+                                GTYSTTVTGR = "GTYSTTVTGR_KIV1_2_3_5",
+                                LFLEPTQADIALLK = "LFLEPTQADIALLK_protease_like",
+                                NPDAVAAPYCYTR = "NPDAVAAPYCYTR_KIV1_2"),
+    absoluteamount = ifelse(qvalue < qval_cutoff, absoluteamount, NA),
+    proteinname = gsub(proteinname, pattern = "_HUMAN", replacement = "")) %>%
+  unite(protein_pept, proteinname, cleansequence, sep="_", remove=FALSE)%>%
+  unite(protein_pept_long, proteinname, cleansequence_long, sep="_", remove=FALSE) %>%
+  merge(., procardis_wl, by.x="filename", by.y="sample_name", all.x = TRUE) %>%
+  arrange(run_order, proteinname, cleansequence_long)
+rm(procardis)
+rm(procardis_wl)
+
+procardis_ms_apoa <- procardis_ms %>%
+  dplyr::filter(str_detect(protein_pept, "APOA_"))
+  # head(1000) %>% View(.)
+  
+procardis_absam_spread <- procardis_ms %>%
+  dplyr::select(-one_of("proteinname", "protein_pept", "cleansequence_long", "targettotalpeakarea", "referencetotalpeakarea", "targetreferenceratio", "modifiedsequence", "qvalue", "cleansequence")) %>%
+  spread(protein_pept_long, absoluteamount)
+
+
+
+procardis_absam_merged_full <- procardis_ucsd %>%
+  mutate(filename = sprintf("Procardis%04d",.$study_id)) %>%
+  full_join(procardis_absam_spread)
+
+
+```
+
+
+```{r data exploration, eval=FALSE, include=FALSE}
+View(head(procardis_ms,100))
+View(head(procardis_absam_merged_full, 100))
+
+map_dbl(eva_ms, ~mean(is.na(.)))
+
+map_dbl(procardis_absam_merged_full, ~sum(is.na(.)))
+
+
+# ggpairs(procardis_absam_merged_full %>% dplyr::select(-(1:9)),
+#         diag = list(continuous=bar_diag),
+#         lower=list(continuous=scatter_smooth))
+
+head(procardis_absam_merged_full)
+```
+
+
+# Variant peptides
+
+Peptides of interest are VTEPISAESGEQVER (APOL1) and LGADMEDVCGR (APOE).
+
+Discuss with Lucas:
+Procardis:
+
+* discontinuity in reference signal for VTEPISAESGEQVER 
+* Selection of AQUA peptides, cfr MRM peptide spreadsheet
+* run effect in apo(a) peptides
+
+Eva:
+
+* no absolute amounts: reason + best approach?
+
+## Procardis
+
+### Overview of peptide absolute quantification
+
+26 peptides have "absolute amount" available, i.e. AQUA reference, target detectable at q<0.001
+
+```{r}
+procardis_ms %>% 
+  group_by(protein_pept) %>%
+  # summarise(perc_avail = sum(!is.na(absoluteamount))) %>%
+  mutate(perc_avail = mean(!is.na(absoluteamount)),
+         n_avail = sum(!is.na(absoluteamount))) %>%
+  dplyr::filter(n_avail > 0) %>%
+  summarise(n_avail = unique(n_avail),
+            perc_avail = unique(perc_avail)) %>%
+  arrange(desc(n_avail)) %>%
+  mutate(apo_anno_col = ifelse(str_detect(protein_pept, pattern = "APOA_"),"APOA",
+                         ifelse(str_detect(protein_pept, pattern = "APOE"), "APOE",
+                                ifelse(str_detect(protein_pept, pattern="APOL1"), "APOL1", "other"))))%>%
+  ggplot(aes(x=reorder(protein_pept,n_avail), y=n_avail, fill=apo_anno_col))+
+  geom_bar(stat = "identity")+
+  theme_bw()+
+  theme(legend.position = "top")+
+  scale_fill_manual(name="apo", values = c("#4477AA","#44AA88","#AA4444", "grey"))+
+  coord_flip()+
+  xlab("")
+
+```
+
+### QC
+
+```{r fig.height=15, fig.width=10}
+procardis_ms %>% 
+  dplyr::filter(str_detect(proteinname, "APOE|APOL1")) %>%
+
+  dplyr::select(run_order, filename, proteinname, protein_pept, referencetotalpeakarea, targettotalpeakarea) %>%
+  gather(peak_type,area,-one_of(c("run_order", "filename", "proteinname", "protein_pept"))) %>%
+  # mutate(isratio = (peak_type=="targetreferenceratio")) %>%
+  # filter(run_order < 100) %>%
+  # count(key)
+  ggplot(aes(x=run_order, y=area, color=peak_type))+
+  geom_point(alpha=0.2, size=0.5)+
+  facet_wrap(~protein_pept, scales = "free", ncol = 1)+
+  theme(legend.position = "top")
+  # facet_grid(cleansequence~isratio, scales = "free")
+  
+# why no reference peak areas for LGADMEDVCGR?
+  
+```
+
+
+### hydrophobicity of peptides
+
+Hypothesis for run-effect is related to hydrophobicity of the peptides.
+
+```{r}
+procardis_ms %>%
+  dplyr::filter(str_detect(proteinname, "APOE|APOL1")) %>%
+  distinct(protein_pept, cleansequence) %>%
+  mutate(hphob = hydrophobicity(cleansequence, scale = "KyteDoolittle")) %>%
+  ggplot(aes(x=reorder(protein_pept, -hphob), y=hphob))+
+  geom_point()+
+  geom_hline(yintercept = 0)+
+  coord_flip()+
+  xlab("peptide")+
+  ylab("Kyte-Doolittle hydrophobicity")
+```
+
+
+
+## EVA
+
+
+### Overview of peptide absolute quantification
+
+No absolute quantification available (all are NA). This dataframe contains only raw machine-produced data
+
+```{r}
+mean(is.na(eva$eg_absoluteamount))
+summary(eva)
+```
+
+
+
+### Manually calculated concentrations
+
+For manual calculation, bovin-normalised peak areas of light and heavy peptides should be used.
+
+```{r}
+# availability of AQUA peptides
+eva_aqua <- str_match(names(eva_bovin_npa), pattern = "(.*)_light") %>% na.omit(.) %>% .[,2]
+
+# Of these, the following have manually calculated concentrations available
+agilent_apo_peptides %>%
+  dplyr::filter(Peptide_clean %in% names(eva_conc)[-(1:5)]) %>%
+  View(.)
+
+
+# For the others, concentrations could be obtained by calculating a standard curve from good samples/columns/plates
+# Reason why not done could be that other peptide for same protein is already available.
+agilent_apo_peptides %>%
+  dplyr::filter(Peptide_clean %in% setdiff(eva_aqua, names(eva_conc)[-(1:5)]))
+
+```
+
+Regression of L/H on light peptide bovin-normalised peak area for selection of good samples in good columns on good plates -> use as standard curve for all samples, to calculate L/H ratio based on light peptide alone.
+
+
+```{r regression-diagnostics}
+lm_fit <- lm(lh_ratio~npa_light, data = eva_linreg_data)
+summary(lm_fit)
+plot(lm_fit)
+
+# dropping influential observations
+lm_fit_dropinfl <- lm(lh_ratio~npa_light, data = eva_linreg_data[-c(171,110),])
+summary(lm_fit_dropinfl)
+plot(lm_fit_dropinfl)
+
+
+# are regression samples VTEPISAESGEQVER light_npa values representative of all samples?
+eva_linreg_data %>%
+  full_join(dplyr::select(eva_bovin_npa,sample, VTEPISAESGEQVER_light)) %>%
+  rename(regression_sample_npa = npa_light, full_dataset_npa = VTEPISAESGEQVER_light) %>%
+  gather(light_pept, npa, regression_sample_npa, full_dataset_npa) %>%
+  dplyr::select(-lh_ratio) %>%
+  drop_na() %>%
+  ggplot(aes(x=npa, color=light_pept))+
+  geom_density()+
+  labs(title="VTEPISAESGEQVER regression")
+```
+
+#### APOL1 VTEPISAESGEQVER
+
+```{r VTEPISAESGEQVER}
+
+
+eva_conc %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  gather(pept, conc) %>%
+  ggplot(aes(x=pept, y=conc))+
+  geom_jitter()
+
+eva_conc %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  ggplot(aes(x=ALDNLAR, y=VTEPISAESGEQVER))+
+  geom_point()
+
+eva_conc %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  ggplot(aes(x=ALDNLAR, y=ALDNLAR/VTEPISAESGEQVER))+
+  geom_point()
+
+eva_conc %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  ggplot(aes(x=VTEPISAESGEQVER, y=ALDNLAR/VTEPISAESGEQVER))+
+  geom_point()
+
+eva_conc %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  ggplot(aes(x="", y=VTEPISAESGEQVER/ALDNLAR))+
+  geom_jitter()
+
+eva_conc %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  ggplot(aes(x=VTEPISAESGEQVER/ALDNLAR))+
+  geom_density()+
+  geom_rug()
+
+
+# restrict to 'good' samples
+eva_conc %>%
+  dplyr::filter(sample %in% eva_linreg_data$sample) %>%
+  dplyr::select(ALDNLAR, VTEPISAESGEQVER) %>%
+  ggplot(aes(x=VTEPISAESGEQVER/ALDNLAR))+
+  geom_density()+
+  geom_rug()
+
+# per-sample normalisation, instead of 'standard curve'
+eva_linreg_data %>%
+  left_join(eva_conc) %>%
+  ggplot(aes(x=lh_ratio/ALDNLAR))+
+  geom_density()+
+  geom_rug()
+  # right tail: less outliers with per-sample norm.
+  # left tail: more density because of outliers in ALDNLAR, which is based on a standard curve?
+  # !!! OR: because of heterozygosity??
+
+
+```
+
+#### APOE LGADMEDVCGR
+
+```{r LGADMEDVCGR}
+# no heavy peptide in EVA
+# heavy peptide IS available for apoE4 variant LGADMEDVR (LGADMEDVCGR -> C130R -> LGADMEDVR)
+# rs429358 = C130R = canonical apoE4 variant
+
+eva_bovin_npa_apoe <- eva_bovin_npa %>%
+  dplyr::select(sample, apoE2_3_light=LGADMEDVCGR, apoE4_h = LGADMEDVR_heavy, apoE4_l = LGADMEDVR_light,
+                LAVYQAGAR_light, AATVGSLAGQPLQER_light) %>%
+  mutate(apoE4_lh = apoE4_l/apoE4_h) %>%
+  inner_join(dplyr::select(eva_conc, sample, apoE4_conc = LGADMEDVR)) %>%
+  dplyr::select(-sample)
+
+ggpairs(eva_bovin_npa_apoe, upper = list(continuous = "points"))
+ggpairs(eva_bovin_npa_apoe %>% dplyr::select(-apoE4_conc))
+
+
+#for report
+ggplot(eva_bovin_npa_apoe, aes(y=apoE4_l, x=apoE2_3_light))+
+  theme_bw()+
+  geom_point(size=1)+
+  xlab("LGADMEDVCGR (apo E2 and E3 variants)")+
+  ylab("LGADMEDVR (apo E4 variant)")
+
+
+
+eva_bovin_npa_apoe %>%
+  ggplot(aes(x="", y=apoE4_lh)) +
+  geom_jitter()
+
+eva_bovin_npa_apoe %>%
+  ggplot(aes(x=apoE4_lh)) +
+  geom_density()
+
+apoe_lh_clusters <- list() 
+max_k <- 9
+for (k in 1:max_k){
+  clust <- kmeans(eva_bovin_npa_apoe$apoE4_lh, centers=k)
+  cat(sprintf("\n\n\n---%s---\ntotwithinss:%s\ntotbetweenss:%s\nin/out: %s\nsizes:\n", 
+                k, clust$tot.withinss, clust$betweenss, clust$tot.withinss/clust$betweenss))
+  cat(paste0(clust$size, collapse = ", "))
+  
+  # clust_id_map <- data.frame(old=1:k, new= order(clust$centers))
+  clust$ordered_clusters <- base::match(clust$cluster, order(clust$centers))
+  apoe_lh_clusters[[k]] <- clust
+}
+cluster_assignments <- map(apoe_lh_clusters, "ordered_clusters") %>% bind_cols() %>% set_names(paste0("k",1:max_k))
+
+eva_bovin_npa_apoe %>%
+  bind_cols(cluster_assignments) %>%
+  gather(k, clusters, one_of(paste0("k",1:max_k))) %>%
+  ggplot(aes(x="", y=apoE4_lh, color=factor(clusters)))+
+  facet_wrap(~k, ncol=3)+
+  geom_jitter()+
+  EnvStats::stat_n_text(aes(color=factor(clusters)))
+
+eva_bovin_npa_apoe %>%
+  bind_cols(cluster_assignments) %>%
+  gather(k, clusters, one_of(paste0("k",1:max_k))) %>%
+  ggplot(aes(x=factor(clusters), fill=factor(clusters)))+
+  facet_wrap(~k, ncol=3)+
+  geom_bar()
+
+
+
+
+#apoE4 vs non-variant pept, by genotype ------
+
+# genotype, see next chunk
+dat_polar <- eva_bovin_npa_apoe %>%
+  mutate(r = sqrt(apoE4_l^2 + apoE2_3_light^2),
+         rho = atan(apoE4_l/apoE2_3_light)) %>%
+  dplyr::select(r, rho) %>%
+  as.matrix()
+apoe_dbscan_rho <- dbscan(dist(dat_polar[,2]), 0.1)
+
+#confirm genotype assignment
+p_geno <-eva_bovin_npa_apoe %>%
+  mutate(genotype = c("hetero", "null", "homo")[apoe_dbscan_rho$cluster]) %>%
+  ggplot(aes(x=apoE4_l, y=apoE2_3_light, color=genotype))+
+  geom_point()+
+  theme_bw()+
+  geom_point(size=1)+
+  xlab("LGADMEDVCGR (apo E2 and E3 variants)")+
+  ylab("LGADMEDVR (apo E4 variant)")+
+  scale_color_discrete("E4 genotype")+
+  theme(
+    legend.position = c(0.7, 0.8)
+  )
+# ggsave(glue("{figdir}/apoe_genotyping.png"), width = 4, height = 4, dpi = 500)
+
+p_bpa_by_geno <- eva_bovin_npa_apoe %>%
+  mutate(genotype = c("hetero", "null", "homo")[apoe_dbscan_rho$cluster]) %>%
+  mutate(genotype = factor(genotype, levels=c("null", "hetero", "homo"))) %>%
+  ggplot(aes(x=genotype, y=LAVYQAGAR_light))+
+  geom_boxplot()+
+  # geom_jitter(width = 0.2)+
+  theme_bw()+
+  stat_n_text()+
+  geom_signif(comparisons = list(c("hetero", "null"),c("homo", "hetero"), c("null", "homo")),
+              y_position = c(15000,15000,17000))+
+  ylab("LAVYQAGAR (apo E non-variant peptide)")+
+  xlab("E4 genotype")
+# ggsave(glue("{figdir}/apoe_bpa_by_genotype.png"), width = 3, height = 4, dpi = 500)
+
+
+
+```
+
+
+For training: clustering of apoE4 points, instead of manually assigning the obvious cluster boundaries.
+
+```{r assign-apoe4-genotypes}
+library(kernlab)
+library(dbscan)
+
+# KDE would be optimal https://stats.stackexchange.com/questions/40454/determine-different-clusters-of-1d-data-from-database
+
+
+dat <- eva_bovin_npa_apoe %>%
+  dplyr::select(apoE4_l, apoE2_3_light) %>%
+  as.matrix()
+
+# Laplacian
+apoe_dist <- dist(dat)
+L <- -as.matrix(apoe_dist)
+diag(L) <- rowSums(as.matrix(apoe_dist))
+
+L_eigen <- eigen(L)
+
+# eigengap?
+L_eigen$values %>% 
+  sort() %>%
+  head(100) %>%
+  plot(.)
+
+# specc on original data
+apoe_specc <- specc(dat, centers = 3)
+
+# specc on polar-transformed data
+dat_polar <- eva_bovin_npa_apoe %>%
+  mutate(r = sqrt(apoE4_l^2 + apoE2_3_light^2),
+         rho = atan(apoE4_l/apoE2_3_light)) %>%
+  dplyr::select(r, rho) %>%
+  as.matrix()
+
+#vis
+par(mfrow=c(1,2))
+plot(dat)
+plot(dat_polar)
+
+# specc laplace kernel
+apoe_specc_polar_laplace <- specc(dat_polar, centers = 3, kernel= "laplacedot")
+
+# specc on rho
+apoe_specc_polar_rho <- specc(as.matrix(dist(dat_polar[,2])), center=3)
+
+#compare
+table(apoe_specc_polar)
+table(apoe_specc)
+
+
+
+
+
+# DBSCAN
+dbscan(dat, 1)
+apoe_dbscan_rho <- dbscan(dist(dat_polar[,2]), 0.1)
+
+# km
+apoe_km_polar <- kmeans(dat_polar, centers=3)
+
+# km solely on rho
+apoe_km_rho <- kmeans(dat_polar[,2]^2, centers=3)
+
+# vis clusters
+par(mfrow=c(1,3))
+plot(x=dat[,1:2], col=apoe_specc)
+plot(x=dat_polar[,1:2], col=apoe_specc_polar)
+plot(x=dat_polar[,1:2], col=apoe_specc_polar_laplace)
+plot(x=dat_polar[,1:2], col=apoe_specc_polar_rho)   #### works but slow
+plot(dat_polar, col=apoe_km_polar$cluster)
+plot(dat_polar, col=apoe_km_rho$cluster)
+plot(dat_polar, col=apoe_dbscan_rho$cluster)  # best solution
+
+```
+
+
+
+#### CLUS ELDESLQVAER
+
+Second allele frequency only ~1%, in HapMap CEU. No evidence of any problems.
+
+```{r}
+eva_bovin_npa_clus <- eva_bovin_npa %>%
+  dplyr::select(sample, clus_variant=ELDESLQVAER_light, clus_unaffected = ASSIIDELFQDR_light) %>%
+  mutate(clus_ratio = clus_variant/clus_unaffected) %>%
+  inner_join(dplyr::select(eva_conc, sample, 
+                           clus_variant_conc = ELDESLQVAER,
+                           clus_unaffected_conc=ASSIIDELFQDR)) %>%
+  dplyr::select(-sample)
+  
+  
+
+ggpairs(eva_bovin_npa_clus)
+
+
+# for report
+p_genotype_clus <- eva_bovin_npa %>%
+  # mutate(genotype = c("hetero", "null", "homo")[apoe_dbscan_rho$cluster]) %>%
+  ggplot(aes(x=ELDESLQVAER_light, y=ASSIIDELFQDR_light))+
+  # geom_point()+
+  theme_bw()+
+  geom_point(size=0.1)+
+  xlab("ELDESLQVAER (CLUS variant)")+
+  ylab("ASSIIDELFQDR (CLUS non-variant)")+
+  theme(
+    legend.position = c(0.7, 0.8)
+  )
+# ggsave(glue("{figdir}/apoe_genotyping3.png"), width = 3, height = 4, dpi=500)
+
+```
+
+
+#### genotyping overview figure
+
+```{r}
+cowplot::plot_grid(p_geno, p_bpa_by_geno, p_genotype_clus,
+                   nrow=1,
+                   rel_widths = c(3,2,3),
+                   labels = "AUTO")
+ggsave(glue("{figdir}/apoe_geno_overview.png"), width = 10, height = 4, dpi=500)
+```
+
+
+### QC
+
+```{r fig.height=20, fig.width=10}
+eva_ms %>% 
+  dplyr::filter(str_detect(proteinname, "APOE|APOL1")) %>%
+
+  dplyr::select(run_order, filename, proteinname, protein_pept, referencetotalpeakarea, targettotalpeakarea) %>%
+  gather(peak_type,area,-one_of(c("run_order", "filename", "proteinname", "protein_pept"))) %>%
+  # mutate(isratio = (peak_type=="targetreferenceratio")) %>%
+  # filter(run_order < 100) %>%
+  # count(key)
+  ggplot(aes(x=run_order, y=area, color=peak_type))+
+  geom_point(alpha=0.2, size=0.5)+
+  facet_wrap(~protein_pept, scales = "free", ncol = 1)+
+  theme(legend.position = "top")
+  # facet_grid(cleansequence~isratio, scales = "free")
+  
+# why no reference peak areas for LGADMEDVCGR?
+  
+```
+
+
+## Overview peptide availability
+
+```{r}
+overview_pept_avail <- agilent_apo_peptides %>%
+  mutate(eva_conc = Peptide_clean %in% names(eva_conc)[-(1:5)],
+         eva_aqua = Peptide_clean %in% eva_aqua,
+         eva_pa = Peptide_clean %in% (names(eva_bovin_npa) %>%  
+           gsub(., pattern = "_light", replacement = "") %>%
+           gsub(., pattern = "_heavy", replacement = "")))
+
+# https://www.rdocumentation.org/packages/condformat/versions/0.8.0
+condformat(overview_pept_avail) %>%
+  rule_fill_discrete(eva_conc, colours = c("TRUE" = "green"))
+
+```
+
+
+
+
+
+
+
+# apo(a) analysis (Procardis)
+
+## QC: run effect and variance per apo(a) peptide
+
+### total amount
+
+Higher variance in kringle peptide abundance, as expected. Protease-like peptide abudance missing for majority of samples.
+
+```{r}
+
+ggplot(procardis_ms_apoa,aes(x=run_order, y=absoluteamount))+
+  geom_point(alpha=0.2, size=0.5)+
+  facet_wrap(protein_pept_long~., scales = "free", ncol=1)
+  
+```
+
+###  target vs reference
+
+Reference shows run effect. Low abundance of the protease peptide LFLEPTQADIALLK
+
+```{r}
+  procardis_ms_apoa %>%
+    dplyr::select(run_order, filename, proteinname, protein_pept, referencetotalpeakarea, targettotalpeakarea) %>%
+    gather(peak_type,area,-one_of(c("run_order", "filename", "proteinname", "protein_pept"))) %>%
+    ggplot(aes(x=run_order, y=area, color=peak_type))+
+    geom_point(alpha=0.2, size=0.5)+
+    facet_wrap(protein_pept~., scales = "free", ncol=1)+
+    theme(legend.position = "top")
+```
+
+### Total target peak area
+
+The total target peak areas of the two kringle peptides GTYSTTVTGR and NPDAVAAPYCYTR are highly correlated,
+adding confidence to the GTYSTTVTGR absolute amount used in downstream analysis. 
+
+Note that the two peptides are not completely equivalent, as they different with regard
+to the kringle domains they are found in. Both are found in the repeat domain KIV2, 
+but GTYSTTVTGR is found also in domains KIV1, KIV3 and KIV5, while NPDAVAAPYCYTR
+is only found in KIV1 and KIV2.
+
+```{r procardis-apoa-pept-targettotalpeakarea, width=15, height=15}
+procardis_ms_apoa %>%
+  dplyr::select(run_order, protein_pept_long, targettotalpeakarea) %>%
+  spread(protein_pept_long,targettotalpeakarea) %>%
+  ggpairs(.,
+        columns = c(2,4,3),
+        diag = list(continuous=bar_diag),
+        lower=list(continuous=scatter_smooth))
+```
+
+For reference: the corresponding plot in EVA:
+
+```{r eva-apoa-pept-targettotalpeakarea, fig.width=15, fig.height=15}
+eva_ms %>%
+  dplyr::filter(str_detect(protein_pept, "APOA_")) %>%
+  dplyr::select(run_order, protein_pept_long, targettotalpeakarea) %>%
+  spread(protein_pept_long,targettotalpeakarea) %>%
+  ggpairs(.,
+        columns = c(2,4,3,5),
+        diag = list(continuous=bar_diag),
+        lower=list(continuous=scatter_smooth))
+```
+
+## correlation between UCSD and apo(a) peptides
+
+
+
+Note large number of missing data points for protease peptide (filtered at Q < 0.001). 
+Protease-like peptide shows poor correlation with Lp(a) concentration, while they should measure the same quantity.
+Run effect and larger variance in reference than target (see higher) could suggest issues with the protease-like peptide signal.
+
+Perfect linear correlation of kringle peptide with Lp(a) concentration is not expected because of inter-indivdual (and intra-individual) variance in kringle repeat copy number (see below). A funnel shape like the scatter for kringle peptide versus protease-like peptide is what would be expected.
+
+It is unclear whether these issues are due to the MS or Lp(a) assay.
+
+The scatter between the absolute amounts of GTYSTTVTGR (kringle) and LFLEPTQADIALLK (protease-like) is similar to the scatter for the (unnormalised) total target peak areas of these peptides (see QC section).
+
+```{r absam-ucsd-apoa-pairs, fig.width=10, fig.height=10}
+ggpairs(procardis_absam_merged_full %>% 
+          dplyr::select(ucsd_lpa_conc,
+                        APOA_GTYSTTVTGR_KIV1_2_3_5, 
+                        APOA_LFLEPTQADIALLK_protease_like,
+                        APOB_TEVIPPLIENR),
+        diag = list(continuous= wrap(bar_diag, bins=30, size=5)),
+        lower=list(continuous=wrap(scatter_smooth, size=5)),
+        upper="blank",
+        showStrips = TRUE)
+# ggsave(glue("{figdir}/apoa_pairs_manual.png"), width = 8, height=8)
+```
+
+When limited to patients with data available on all three:
+
+```{r absam-ucsd-apoa-pairs-dropna, fig.width=10, fig.height=10}
+procardis_absam_merged_full %>% 
+  dplyr::select(ucsd_lpa_conc,
+                APOA_GTYSTTVTGR_KIV1_2_3_5,
+                APOA_LFLEPTQADIALLK_protease_like,
+                APOB_TEVIPPLIENR) %>%
+  drop_na() %>%
+  ggpairs(.,
+        diag = list(continuous=wrap(density_rug_diag, bw=2.5)),
+        lower=list(continuous=scatter_smooth),
+        upper="blank")
+                  
+
+```
+
+
+### Missingness of MS peptide signals as function of Lp(a) conc.
+
+```{r apoa-missingness}
+
+procardis_absam_merged_full %>%
+  dplyr::select(ucsd_lpa_conc, APOA_GTYSTTVTGR_KIV1_2_3_5, APOA_LFLEPTQADIALLK_protease_like) %>%
+  gather(measurement, value, -ucsd_lpa_conc) %>%
+  mutate(peptide_avail = ifelse(is.na(value),"missing", "available")) %>%
+  ggplot(aes(x=peptide_avail,y=ucsd_lpa_conc))+
+  geom_boxplot()+
+  EnvStats::stat_n_text()+
+  facet_wrap(~measurement)+
+  xlab("peptide absolute quantity")+
+  ylab("UCSD Lp(a) concentration")+
+  geom_signif(comparisons = list(c("missing", "available")),
+              margin_top = 0.1)
+
+wilcox.test(formula=ucsd_lpa_conc~is.na(APOA_GTYSTTVTGR_KIV1_2_3_5), 
+            data = procardis_absam_merged_full)
+
+wilcox.test(formula=ucsd_lpa_conc~is.na(APOA_LFLEPTQADIALLK_protease_like), 
+            data = procardis_absam_merged_full)
+
+procardis_absam_merged_full %>%
+  dplyr::select(ucsd_lpa_conc, `Kringle repeat`=APOA_GTYSTTVTGR_KIV1_2_3_5, constant=APOA_LFLEPTQADIALLK_protease_like) %>%
+  gather(measurement, value, -ucsd_lpa_conc) %>%
+  drop_na(ucsd_lpa_conc) %>%
+  mutate(peptide_avail = ifelse(is.na(value),"missing", "available")) %>%
+  dplyr::select(-value) %>%
+  group_by(measurement) %>%
+  mutate(lpa_conc_quant = ntile(ucsd_lpa_conc, 5)) %>% 
+  group_by(measurement, lpa_conc_quant) %>%
+  summarise(perc_missing = mean(peptide_avail=="missing")) %>% 
+  ggplot(aes(x=lpa_conc_quant, y=perc_missing))+
+  geom_bar(stat = "identity", position = "dodge")+
+  facet_grid(measurement~.)+
+  xlab("Quintiles of Lp(a) concentration")+
+  ylab("Proportion missing MRM peptide signal")
+  
+
+```
+
+
+### Normalise for Lp(a) concentration
+
+Kringle peptide signal = (apo(a) concentration) x (kringle IV_2 copy number).
+
+Therefore, the apo(a) concentration-normalised Kringle peptide signal should be proportional to the kringle copy number. Two measurements relating to apo(a) concentration are available: Lp(a) mass and protease-like peptide abundance. Note that Lp(a) mass is only proportional to apo(a) concentration for fixed composition (lipids and carbohydrates) of the Lp(a) particle, which might not be the case between patients.
+
+#### Normalise by Lp(a) concentration
+
+Multiple peaks suggest correspondance with kringle copy number. Note that this ratio corresponds to the slope in the scatter plot, and therefore multiple peaks confirm that linear function is not a good approximation of the relation between kringle peptide signal and Lp(a). The histogram resembles @tsimikasTestContextLipoprotein2017, figure 7A, but less @kraftFrequencyDistributionsApolipoprotein1996, figure 3.
+
+```{r}
+
+# kringle peptide intensity, per Lp(a) abundance unit
+tmp <- procardis_absam_merged_full %>%
+  mutate(kringle_lpa_ratio = APOA_GTYSTTVTGR_KIV1_2_3_5/ucsd_lpa_conc,
+         inv_lpa_mg_dl = 1/ucsd_lpa_conc) %>%
+  dplyr::filter(kringle_lpa_ratio < quantile(kringle_lpa_ratio, 0.95, na.rm=TRUE)) %>%
+  mutate(ratio_bin = ntile(kringle_lpa_ratio, 5)) %>%
+  group_by(ratio_bin) %>%
+  mutate(ratio_bin_median = median(kringle_lpa_ratio))
+
+```
+
+```{r kringle-per-lpa-histogram}
+
+# ratio kringle pept/lpa conc histogram
+ggplot(tmp, aes(x=kringle_lpa_ratio))+
+  geom_histogram(aes(y = ..ncount..), bins=50) + 
+  geom_rug()+
+  geom_density(aes(y = ..scaled..), bw=0.15)+
+  labs(title = sprintf("n=%d", sum(!is.na(tmp$kringle_lpa_ratio))))
+
+
+```
+
+#### Normalise by protease-like peptide signal
+
+Normalising the Kringle peptide signal for protease-like peptide signal should give the same result, but does not because of poor correlation between protease-like peptide and Lp(a) concentration.
+
+```{r kringle-per-protlike-histogram}
+# ratio kringle pept/protease pept histogram
+n_ratio <- sum(!is.na(procardis_absam_spread$APOA_GTYSTTVTGR_KIV1_2_3_5/procardis_absam_spread$APOA_LFLEPTQADIALLK_protease_like))
+
+procardis_absam_spread %>%
+  dplyr::select(contains("APOA_"))%>%
+  mutate(kringle_protease_ratio = APOA_GTYSTTVTGR_KIV1_2_3_5/APOA_LFLEPTQADIALLK_protease_like) %>%
+  ggplot(aes(x=kringle_protease_ratio))+
+  geom_histogram(aes(y = ..ncount..), bins=50) + 
+  geom_rug()+
+  geom_density(aes(y = ..scaled..), bw=0.15)+
+  labs(title = glue("n={n_ratio}"))
+
+```
+
+
+### Lp(a) concentration as function of inferred kringle repeat number
+
+Lp(a) concentration increases with kringle/protease-like peptide ratio. Contrasts with inverse relation between apo(a) size and Lp(a) concentration described in literature (Schmidt2016 fig4). Tsimikas2017: Lp(a) assays are accurate up to 30 mg/dL (wo standard) or 50 mg/dL (with standard).
+
+In contrast, Lp(a) concentration does decrease with kringle/Lp(a) concentration ratio. But this is could be just a mathematical artefact, as the variable on the y-axis is in the denominator of the x-axis.  To illustrate this effect, a similar inverse relation is seen when the kringle single is replaced with an unrelated apolipoprotein signal.
+
+```{r lpa-kringle-dist-protlike-norm}
+# kringle/protease-like ratio vs Lp(a)
+ggplot(tmp, aes(y=ucsd_lpa_conc, x=APOA_GTYSTTVTGR_KIV1_2_3_5/APOA_LFLEPTQADIALLK_protease_like))+
+  geom_point()+
+  ylab("Lp(a) [mg/dL]")+
+  labs(title="protease-like peptide normalisation")
+```
+
+```{r lpa-kringle-dist-lpa-norm}
+# kringle/ucsd_lpa_conc ratio vs Lp(a)
+ggplot(tmp, aes(y=ucsd_lpa_conc, x=APOA_GTYSTTVTGR_KIV1_2_3_5/ucsd_lpa_conc))+
+  geom_point()+
+  ylab("Lp(a) [mg/dL]")+
+  labs(title="Lp(a) concentration normalisation")
+```
+
+```{r lpa-kringle-dist-dummy}
+ggplot(tmp, aes(y=ucsd_lpa_conc, x=APOD_NILTSNNIDVK/ucsd_lpa_conc))+
+  geom_point()+
+  ylab("Lp(a) [mg/dL]")+
+  labs(title="dummy relation")
+ggplot(tmp, aes(y=ucsd_lpa_conc, x=APOC1_EFGNTLEDK/ucsd_lpa_conc))+
+  geom_point()+
+  ylab("Lp(a) [mg/dL]")+
+  labs(title="dummy relation")
+```
+
+
+
+
+```{r eval=FALSE, include=FALSE}
+# not a great analysis, not more informative than scatter
+# ECDF
+ggplot(tmp, aes(x=ucsd_lpa_conc, color=ratio_bin_median, group=ratio_bin_median))+
+  stat_ecdf()+
+  scale_color_continuous(low = "green", high="red")
+
+# density ridges plot
+ggplot(tmp, aes(x=ucsd_lpa_conc, y=factor(ratio_bin_median)))+
+  geom_density_ridges2()
+```
+
+```{r eval=FALSE, include=FALSE}
+# run analysis on simulated null data to avoid overinterpretation 
+# x <- runif(250,0,100)
+# x <- rgeom(250,0.5)
+# x <- rbeta(250,1,50)*150
+# y <- abs(x + rnorm(250, 0,5))
+# hist(x, breaks=30)
+# plot(x,y)
+# df <- data.frame(x=x,y=y)
+# tmp2 <- df %>%
+#   mutate(ratio = y/x) %>%
+#   dplyr::filter(ratio < quantile(ratio,0.95, na.rm=TRUE)) %>%
+#   mutate(ratio_bin = ntile(ratio, 5)) %>%
+#   group_by(ratio_bin)%>%
+#   mutate(ratio_bin_median = median(ratio))
+# ggplot(tmp2, aes(x=ratio))+
+#   geom_histogram(aes(y = ..ncount..), bins=50) + 
+#   geom_density(aes(y = ..scaled..), bw=0.15)+
+#   labs(title = sprintf("n=%d", sum(!is.na(tmp$ratio))))
+# ggplot(tmp2, aes(x=x, color=ratio_bin_median, group=ratio_bin_median))+
+#   stat_ecdf(bw=0.15)+
+#   scale_color_continuous(low = "green", high="red")
+# ggplot(tmp2, aes(x=x, y=factor(ratio_bin_median)))+
+#   geom_density_ridges2()
+
+```
+
+
+
+
+
+## Association with all AQUA procardis peptides
+
+Cor values and associated p values are based on Spearman correlation. Blue smoothers and confidence band are based on Generalized Additive Models (GAM).
+
+### Kringle peptide GTYSTTVTGR
+
+Kringle peptide is only strongly correlated with Lp(a) and apo(a) protease-like peptide. Negative correlations with APOE2 and APOE4 variant peptides are of non-negligible magnitude.  Some other, weaker correlations also reach statistical significance.
+
+```{r kringle, fig.width=10, fig.height=20, warning=FALSE}
+
+p_df <- procardis_absam_merged_full %>%
+  dplyr::select(-(c(1,2,4:9))) %>%
+  gather(peptide, value, -contains("GTYSTTVTGR")) %>%
+  group_by(peptide) %>%
+  # summary(.)
+  # nest() %>%
+  # map(~cor(.x$APOA_GTYSTTVTGR_KIV1_2_3_5, .x$value))
+  mutate(n_avail=sum((!is.na(value)) & !is.na(APOA_GTYSTTVTGR_KIV1_2_3_5))) %>%
+  dplyr::filter(n_avail > 0)
+
+cor_df <- p_df %>%
+  summarise(anno = sprintf("cor=%s\np=%s\nn=%s", 
+                          round(cor(APOA_GTYSTTVTGR_KIV1_2_3_5, value, 
+                                    use = "pairwise.complete.obs",
+                                    method = "spearman"),
+                                digits = 3),
+                          round(cor.test(APOA_GTYSTTVTGR_KIV1_2_3_5, value, method = "spearman")$p.value,
+                                digits=3),
+                          unique(n_avail)),
+            y_height = max(value, na.rm = TRUE)*0.70)
+  
+p_df %>%
+  ggplot(aes(x=APOA_GTYSTTVTGR_KIV1_2_3_5, y=value))+
+  geom_point(size=0.3, alpha=0.2)+
+  geom_smooth(alpha=0.3, size=0.5)+
+  # geom_text(aes(label=n_avail,x=200,y=1),vjust = "inward", hjust = "inward")+
+  geom_text(data = cor_df, aes(x=200,y=y_height, label=anno), size=3)+
+  facet_wrap(~peptide, ncol = 4, scales = "free")+
+  theme_bw()
+```
+
+### Protease-like peptide LFLEPTQADIALLK
+
+Protease-like domain peptide. Strong correlations with kringle peptide and Lp(a) as expected. Correlations with APOA1, APOB (two peptides), APOC2, APOC3, APOE (single, non-variant peptide) are of non-negligble magnitude. Some other, weaker correlations also reach statistical significance. In contrast to the kringle peptide (above), there is no negative correlation with APOE variants.
+
+```{r protease-like, fig.width=10, fig.height=20, warning=FALSE}
+p_df <- procardis_absam_merged_full %>%
+  dplyr::select(-(c(1,2,4:9))) %>%
+  gather(peptide, value, -contains("protease")) %>%
+  group_by(peptide) %>%
+  # summary(.)
+  # nest() %>%
+  # map(~cor(.x$APOA_GTYSTTVTGR_KIV1_2_3_5, .x$value))
+  mutate(n_avail=sum((!is.na(value)) & !is.na(APOA_LFLEPTQADIALLK_protease_like))) %>%
+  dplyr::filter(n_avail > 0)
+
+cor_df <- p_df %>%
+  summarise(anno = sprintf("cor=%s\np=%s\nn=%s", 
+                          round(cor(APOA_LFLEPTQADIALLK_protease_like, value, 
+                                    use = "pairwise.complete.obs",
+                                    method = "spearman"),
+                                digits = 3),
+                          round(cor.test(APOA_LFLEPTQADIALLK_protease_like, value, method = "spearman")$p.value,
+                                digits=3),
+                          sum((!is.na(value)) & !is.na(APOA_LFLEPTQADIALLK_protease_like))),
+            y_height = max(value, na.rm = TRUE)*0.70)
+  
+p_df %>%
+  ggplot(aes(x=APOA_LFLEPTQADIALLK_protease_like, y=value))+
+  geom_point(size=0.3, alpha=0.2)+
+  geom_smooth(alpha=0.3, size=0.5)+
+  # geom_text(aes(label=n_avail,x=200,y=1),vjust = "inward", hjust = "inward")+
+  geom_text(data = cor_df, aes(x=40,y=y_height, label=anno), size=3)+
+  facet_wrap(~peptide, ncol = 4, scales = "free")+
+  xlim(c(0,50))+
+  theme_bw()
+
+
+```
+
+### UCSD Lp(a) concentration
+
+Concentration of Lp(a) only correlates with apo(a) peptides. 
+
+```{r lpa, fig.height=20, fig.width=10, warning=FALSE}
+
+p_df <- procardis_absam_merged_full %>%
+  dplyr::select(-(c(1,2,4:9))) %>%
+  gather(peptide, value, -contains("_lpa_")) %>%
+  group_by(peptide) %>%
+  # summary(.)
+  # nest() %>%
+  # map(~cor(.x$APOA_GTYSTTVTGR_KIV1_2_3_5, .x$value))
+  mutate(n_avail=sum((!is.na(value)) & !is.na(ucsd_lpa_conc))) %>%
+  dplyr::filter(n_avail > 0)
+
+cor_df <- p_df %>%
+  summarise(anno = sprintf("cor=%s\np=%s\nn=%s", 
+                          round(cor(ucsd_lpa_conc, value, 
+                                    use = "pairwise.complete.obs",
+                                    method = "spearman"),
+                                digits = 3),
+                          round(cor.test(ucsd_lpa_conc, value, method = "spearman")$p.value,
+                                digits=3),
+                          sum((!is.na(value)) & !is.na(ucsd_lpa_conc))),
+            y_height = max(value, na.rm = TRUE)*0.70)
+  
+p_df %>%
+  ggplot(aes(x=ucsd_lpa_conc, y=value))+
+  geom_point(size=0.3, alpha=0.2)+
+  geom_smooth(alpha=0.3, size=0.5)+
+  # geom_text(aes(label=n_avail,x=200,y=1),vjust = "inward", hjust = "inward")+
+  geom_text(data = cor_df, aes(x=70,y=y_height, label=anno), size=3)+
+  facet_wrap(~peptide, ncol = 4, scales = "free")+
+  # xlim(c(0,50))+
+  theme_bw()
+
+```
+
+
+# apo(a) in Bruneck
+
+```{r}
+
+#spearman
+bruneck_rerun_apoa %>%
+  dplyr::select(
+    "GTYSTTVTGR_kringle_conc" = "GTYSTTVTGR",
+    "NPDAVAAPYCYTR_kringle_npa" = "NPDAVAAPYCYTR",
+    "LFLEPTQADIALLK_constant_conc" = "LFLEPTQADIALLK",
+    "TPAYYPNAGLIK_constant_npa" = "TPAYYPNAGLIK"
+  ) %>%
+  # dplyr::rename(
+  #   "GTYSTTVTGR(kringle)" = "GTYSTTVTGR",
+  #   "LFLEPTQADIALLK(constant)" = "LFLEPTQADIALLK",
+  #   "NPDAVAAPYCYTR(kringle)" = "NPDAVAAPYCYTR",
+  #   "TPAYYPNAGLIK(constant)" = "TPAYYPNAGLIK"
+  # ) %>%
+  # dplyr::select(-one_of("row_label", "ratio")) %>%
+  ggpairs(.,
+          diag = list(continuous= wrap(bar_diag, bins=30, size=5)),
+          lower=list(continuous=wrap(scatter_smooth, size=5)),
+          upper="blank",
+          showStrips = TRUE        
+  )
+
+#pearson
+
+bruneck_rerun_apoa %>%
+  dplyr::select(
+    "GTYSTTVTGR_kringle_conc" = "GTYSTTVTGR",
+    "NPDAVAAPYCYTR_kringle_npa" = "NPDAVAAPYCYTR",
+    "LFLEPTQADIALLK_constant_conc" = "LFLEPTQADIALLK",
+    "TPAYYPNAGLIK_constant_npa" = "TPAYYPNAGLIK"
+  ) %>%
+  ggpairs(.,
+          diag = list(continuous= wrap(bar_diag, bins=30, size=5)),
+          lower=list(continuous=wrap(scatter_smooth, size=5, corfnc="pearson")),
+          upper="blank",
+          showStrips = TRUE        
+  )
+
+```
+
+
+Simulation: noise of ratio of two variables with lognormal distribution
+
+```{r}
+
+par(mfrow=c(10,4))
+for (x in 1:10){
+  x <- abs(rlnorm(650)+rnorm(650,0,10))
+  y <- abs(rlnorm(650)+rnorm(650,0,10))
+  
+  hist(x, breaks = 30)
+  hist(y, breaks = 30)
+  plot(x,y)
+  hist(y/x, breaks = 30)
+}
+par(mfrow=c(1,1))
+
+```
+
+Simulation: noise of ratio of two variables with lognormal distribution.
+y~x
+
+```{r}
+
+par(mfrow=c(10,5))
+for (x in 1:10){
+  x <- pmax(0.5, abs(rlnorm(650)+rnorm(650,0,1)))  #pmax: detection limit
+  n_kringle <- abs(rnorm(650, 20, 2))
+  y <- pmax(min(x),abs(x*n_kringle+rnorm(650,0,10)))
+  
+  hist(x, breaks = 30)
+  hist(n_kringle, breaks=30)
+  hist(y, breaks = 30)
+  # scatter_smooth(data = data.frame(x,y), mapping=aes(x=x, y=y))
+  plot(x,y)
+  hist(y/x, breaks = 30)
+}
+par(mfrow=c(1,1))
+
+
+```
+
+Same but little noise
+
+```{r}
+
+par(mfrow=c(10,5))
+for (x in 1:10){
+  x <- pmax(0.5, abs(rlnorm(650)+rnorm(650,0,1))) #pmax: detection limit
+  n_kringle <- abs(rnorm(650, 20, 2))
+  y <- pmax(min(x),abs(x*n_kringle+rnorm(650,0,1)))
+  
+  hist(x, breaks = 30)
+  hist(n_kringle, breaks=30)
+  hist(y, breaks = 30)
+  # plot(scatter_smooth(data = data.frame(x,y), mapping=aes(x=x, y=y)))
+  plot(x,y)
+  hist(y/x, breaks = 30)
+}
+par(mfrow=c(1,1))
+
+```
+
+
+
+# References
+
